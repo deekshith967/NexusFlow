@@ -1,0 +1,4 @@
+export enum FailurePolicy {
+  FAIL_WORKFLOW = 'FAIL_WORKFLOW',
+  SKIP_DOWNSTREAM = 'SKIP_DOWNSTREAM',
+}
