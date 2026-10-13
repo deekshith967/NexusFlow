@@ -29,6 +29,7 @@ export interface EnvConfig {
     readonly pollIntervalMs: number;
     readonly batchLimit: number;
     readonly claimTtlMs: number;
+    readonly publishTimeoutMs: number;
   };
 }
 
@@ -166,6 +167,15 @@ export function loadEnvConfig(
         env.RELAY_CLAIM_TTL_MS,
         30_000,
         'RELAY_CLAIM_TTL_MS',
+      ),
+      // Bounded wait for a single broker publish. A publish that takes
+      // longer is treated as a failure (recorded + claim released,
+      // retried via the outbox) so one wedged broker call can never
+      // stall the relay — and shutdown drain is therefore bounded.
+      publishTimeoutMs: parsePositiveInt(
+        env.RELAY_PUBLISH_TIMEOUT_MS,
+        30_000,
+        'RELAY_PUBLISH_TIMEOUT_MS',
       ),
     },
   };

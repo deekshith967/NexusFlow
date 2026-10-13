@@ -57,7 +57,7 @@ function config(): EnvConfig {
     },
     scheduler: { pollIntervalMs: 20, batchLimit: 20, leaseMs: 30_000 },
     worker: { consumerGroup: 'test-group' },
-    relay: { pollIntervalMs: 20, batchLimit: 20, claimTtlMs: 5_000 },
+    relay: { pollIntervalMs: 20, batchLimit: 20, claimTtlMs: 5_000, publishTimeoutMs: 5_000 },
   };
 }
 

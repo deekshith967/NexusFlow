@@ -584,6 +584,132 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
     ]);
   });
 
+  it('shutdown drains a stuck publish within the publish timeout and keeps the event durable', async () => {
+    // A transport whose publish NEVER resolves (wedged broker).
+    let publishCalls = 0;
+    const stuckTransport: MessageTransport = {
+      kind: 'memory',
+      ensureTopics: async () => undefined,
+      publisher: {
+        publish: async () => {
+          publishCalls += 1;
+          await new Promise<void>(() => {
+            /* never resolves */
+          });
+        },
+        isReady: async () => true,
+        close: async () => undefined,
+      },
+      consumer: {
+        subscribe: async () => undefined,
+        close: async () => undefined,
+      },
+      close: async () => undefined,
+    };
+
+    const relay = new OutboxRelayService(
+      new DatabaseService(pool),
+      {
+        ...baseConfig(),
+        serviceId: 'relay-drain',
+        relay: { ...baseConfig().relay, publishTimeoutMs: 200 },
+      },
+      stuckTransport,
+    );
+
+    const row = (
+      await pool.query<{ outbox_event_id: string }>(
+        `
+        INSERT INTO outbox_events (
+          outbox_event_id, event_id, event_type, schema_version,
+          aggregate_type, aggregate_id, correlation_id, producer,
+          payload, occurred_at, created_at
+        )
+        VALUES (gen_random_uuid(), gen_random_uuid(), 'test.event', '1.0.0',
+                'test', gen_random_uuid(), 'corr', 'test', '{}', now(), now())
+        RETURNING outbox_event_id
+      `
+      )
+    ).rows[0];
+
+    const sql =
+      'SELECT claim_owner, published_at, publish_attempts, last_error FROM outbox_events WHERE outbox_event_id = $1';
+
+    // Start a pump; its publish is now stuck inside the transport.
+    const pumpP = relay.pump();
+
+    await waitForRowState(
+      pool, sql, [row.outbox_event_id],
+      (r) => r.claim_owner === relay.claimOwner,
+      'relay to claim the event before the publish wedges',
+    );
+
+    // Request shutdown.
+    const shutdownP = relay.onApplicationShutdown();
+    let shutdownReturned = false;
+
+    shutdownP.then(() => {
+      shutdownReturned = true;
+    });
+
+    // While the stuck publish is still in flight, shutdown must NOT
+    // have returned — and the row must still be claimed (the relay has
+    // not yet finished its cycle).
+    await new Promise((r) => setTimeout(r, 50));
+    expect(shutdownReturned).toBe(false);
+
+    const midShutdown = (
+      await pool.query<{ claim_owner: string | null; published_at: string | null }>(
+        sql,
+        [row.outbox_event_id],
+      )
+    ).rows[0];
+    expect(midShutdown.claim_owner).toBe(relay.claimOwner);
+    expect(midShutdown.published_at).toBeNull();
+
+    // Shutdown must return once the in-flight cycle drains — bounded by
+    // the 200ms publish timeout, not by the wedged transport.
+    const startedAt = Date.now();
+    await shutdownP;
+    const elapsed = Date.now() - startedAt;
+    expect(elapsed).toBeLessThan(5_000);
+
+    // The relay stopped waiting for the wedged publish, recorded the
+    // failure, and released the claim: the event is durable and
+    // retryable by another relay.
+    const after = (
+      await pool.query<{
+        claim_owner: string | null;
+        published_at: string | null;
+        publish_attempts: number;
+        last_error: string | null;
+      }>(sql, [row.outbox_event_id])
+    ).rows[0];
+    expect(after.published_at).toBeNull();
+    expect(after.claim_owner).toBeNull();
+    expect(after.publish_attempts).toBe(1);
+    expect(after.last_error).toMatch(/publish did not complete within 200ms/);
+
+    // After shutdown completes, no further pump can perform transport
+    // operations.
+    await relay.pump();
+    expect(publishCalls).toBe(1);
+
+    const unchanged = (
+      await pool.query<{ claim_owner: string | null; published_at: string | null }>(
+        sql,
+        [row.outbox_event_id],
+      )
+    ).rows[0];
+    expect(unchanged.claim_owner).toBeNull();
+    expect(unchanged.published_at).toBeNull();
+
+    // Keep the outbox clean for the remaining tests.
+    await pool.query('DELETE FROM outbox_events WHERE outbox_event_id = $1', [
+      row.outbox_event_id,
+    ]);
+  });
+
   it('hasBacklog and isReady report correctly', async () => {
     expect(await engine.relay.hasBacklog()).toBe(false);
 

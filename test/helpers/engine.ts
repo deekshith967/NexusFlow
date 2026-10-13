@@ -44,6 +44,7 @@ export interface BaseConfigOptions {
   leaseMs?: number;
   pollIntervalMs?: number;
   claimTtlMs?: number;
+  publishTimeoutMs?: number;
 }
 
 export function baseConfig(options: BaseConfigOptions = {}): EnvConfig {
@@ -71,6 +72,7 @@ export function baseConfig(options: BaseConfigOptions = {}): EnvConfig {
       pollIntervalMs: options.pollIntervalMs ?? 20,
       batchLimit: 20,
       claimTtlMs: options.claimTtlMs ?? 5_000,
+      publishTimeoutMs: options.publishTimeoutMs ?? 5_000,
     },
   };
 }
