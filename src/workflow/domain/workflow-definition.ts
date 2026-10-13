@@ -1,7 +1,14 @@
 import { FailurePolicy } from './failure-policy';
 
 export interface RetryPolicy {
+  /** Maximum number of attempts, including the first one (>= 1). */
   readonly maxAttempts: number;
+  /**
+   * Delay before the next retry (ms). Optional; when omitted the scheduler
+   * may retry immediately (default 0). This is an implementation detail
+   * permitted by the contract's `retry_policy JSONB` column.
+   */
+  readonly retryDelayMs?: number;
 }
 
 export interface TaskDefinition {

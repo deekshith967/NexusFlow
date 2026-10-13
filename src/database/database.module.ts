@@ -1,6 +1,7 @@
 import { Logger, Module } from '@nestjs/common';
 import { Pool } from 'pg';
 import { DatabaseService } from './database.service';
+import { configurePgTypeParsers } from './parsers';
 
 const logger = new Logger('DatabaseModule');
 
@@ -13,6 +14,8 @@ const logger = new Logger('DatabaseModule');
         if (!connectionString?.trim()) {
           throw new Error('DATABASE_URL is required for PostgreSQL access');
         }
+
+        configurePgTypeParsers();
 
         const pool = new Pool({ connectionString });
         pool.on('error', () => {
