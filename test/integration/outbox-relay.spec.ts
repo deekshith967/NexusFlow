@@ -15,6 +15,67 @@ import { SchedulerService } from '../../src/scheduler/scheduler.service';
 import { baseConfig, createEngine, Engine, setupRun, task } from '../helpers/engine';
 import { startTestDb, TestDb } from '../helpers/test-db';
 import { DatabaseService } from '../../src/database/database.service';
+import { MessageTransport } from '../../src/transport/types';
+
+/**
+ * A transport whose publish() blocks on a gate the test controls,
+ * then either succeeds or throws. Lets tests hold a relay mid-publish.
+ */
+function gatedTransport(failAfterRelease: boolean, errorMessage: string) {
+  let release: () => void;
+
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const transport: MessageTransport = {
+    kind: 'memory',
+    ensureTopics: async () => undefined,
+    publisher: {
+      publish: async () => {
+        await gate;
+        if (failAfterRelease) {
+          throw new Error(errorMessage);
+        }
+      },
+      isReady: async () => true,
+      close: async () => undefined,
+    },
+    consumer: {
+      subscribe: async () => undefined,
+      close: async () => undefined,
+    },
+    close: async () => undefined,
+  };
+
+  return { transport, release: () => release() };
+}
+
+async function waitForRowState(
+  pool: Pool,
+  sql: string,
+  values: unknown[],
+  test: (row: Record<string, unknown>) => boolean,
+  what: string,
+  timeoutMs = 10_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    const result = await pool.query<Record<string, unknown>>(sql, values);
+    const row = result.rows[0];
+
+    if (row && test(row)) {
+      return row;
+    }
+
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${what}; row=${JSON.stringify(result.rows)}`);
+    }
+
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
 
 describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
   let db: TestDb;
@@ -342,6 +403,185 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
       return envelope.eventId === eventId.event_id;
     });
     expect(deliveries.length).toBe(1);
+  });
+
+  it('a relay that lost claim ownership must not clear the new owners claim', async () => {
+    // Insert one unpublished event.
+    const row = (
+      await pool.query<{ outbox_event_id: string }>(
+        `
+        INSERT INTO outbox_events (
+          outbox_event_id, event_id, event_type, schema_version,
+          aggregate_type, aggregate_id, correlation_id, producer,
+          payload, occurred_at, created_at
+        )
+        VALUES (gen_random_uuid(), gen_random_uuid(), 'test.event', '1.0.0',
+                'test', gen_random_uuid(), 'corr', 'test', '{}', now(), now())
+        RETURNING outbox_event_id
+      `
+      )
+    ).rows[0];
+
+    const sql = 'SELECT claim_owner, claim_expires_at, publish_attempts, last_error, published_at FROM outbox_events WHERE outbox_event_id = $1';
+
+    // Relay A claims and starts publishing (blocks on its gate).
+    const a = gatedTransport(true, 'simulated outage A');
+    const relayA = new OutboxRelayService(
+      new DatabaseService(pool),
+      { ...baseConfig(), serviceId: 'relay-ownership-A' },
+      a.transport,
+    );
+    const pumpA = relayA.pump();
+
+    await waitForRowState(
+      pool, sql, [row.outbox_event_id],
+      (r) => r.claim_owner === relayA.claimOwner,
+      'relay A to claim the event',
+    );
+
+    // A's claim expires, and relay B reclaims while A is still publishing.
+    await pool.query(
+      'UPDATE outbox_events SET claim_expires_at = now() - interval \'1 second\' WHERE outbox_event_id = $1',
+      [row.outbox_event_id],
+    );
+
+    const b = gatedTransport(false, 'unused');
+    const relayB = new OutboxRelayService(
+      new DatabaseService(pool),
+      { ...baseConfig(), serviceId: 'relay-ownership-B' },
+      b.transport,
+    );
+    const pumpB = relayB.pump();
+
+    await waitForRowState(
+      pool, sql, [row.outbox_event_id],
+      (r) => r.claim_owner === relayB.claimOwner,
+      'relay B to reclaim the event',
+    );
+
+    // A's publish now fails. Its failure cleanup must detect the lost
+    // ownership and leave the row untouched for B.
+    a.release();
+    await pumpA;
+
+    const afterA = (
+      await pool.query<{
+        claim_owner: string | null;
+        claim_expires_at: string | null;
+        publish_attempts: number;
+        last_error: string | null;
+        published_at: string | null;
+      }>(sql, [row.outbox_event_id])
+    ).rows[0];
+
+    expect(afterA.claim_owner).toBe(relayB.claimOwner);
+    expect(afterA.claim_expires_at).not.toBeNull();
+    expect(afterA.publish_attempts).toBe(0);
+    expect(afterA.last_error).toBeNull();
+    expect(afterA.published_at).toBeNull();
+
+    // B finishes: publishes successfully and marks the row published
+    // under its own ownership (at-least-once, exactly one mark).
+    b.release();
+    await pumpB;
+
+    const afterB = (
+      await pool.query<{ claim_owner: string | null; publish_attempts: number; published_at: string | null }>(sql, [row.outbox_event_id])
+    ).rows[0];
+    expect(afterB.published_at).not.toBeNull();
+    expect(afterB.claim_owner).toBeNull();
+    expect(afterB.publish_attempts).toBe(1);
+  });
+
+  it('shutdown waits for an in-flight publish cycle and stops future polls', async () => {
+    const inserted = (
+      await pool.query<{ outbox_event_id: string }>(
+        `
+        INSERT INTO outbox_events (
+          outbox_event_id, event_id, event_type, schema_version,
+          aggregate_type, aggregate_id, correlation_id, producer,
+          payload, occurred_at, created_at
+        )
+        VALUES (gen_random_uuid(), gen_random_uuid(), 'test.event', '1.0.0',
+                'test', gen_random_uuid(), 'corr', 'test', '{}', now(), now())
+        RETURNING outbox_event_id
+      `
+      )
+    ).rows[0];
+
+    const sql = 'SELECT claim_owner, published_at FROM outbox_events WHERE outbox_event_id = $1';
+
+    const g = gatedTransport(false, 'unused');
+    const relay = new OutboxRelayService(
+      new DatabaseService(pool),
+      { ...baseConfig(), serviceId: 'relay-shutdown' },
+      g.transport,
+    );
+
+    // Start a pump; its publish blocks on the gate (in flight).
+    const pumpP = relay.pump();
+
+    await waitForRowState(
+      pool, sql, [inserted.outbox_event_id],
+      (r) => r.claim_owner === relay.claimOwner,
+      'relay to claim the event',
+    );
+
+    // Shutdown must not return while the in-flight cycle still needs
+    // the pool/transport.
+    const shutdownP = relay.onApplicationShutdown();
+    let shutdownReturned = false;
+
+    shutdownP.then(() => {
+      shutdownReturned = true;
+    });
+
+    // The publish is still blocked: shutdown cannot have returned.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(shutdownReturned).toBe(false);
+
+    // Release the publish; the cycle finishes, then shutdown returns.
+    g.release();
+    await pumpP;
+    await shutdownP;
+
+    const row = (
+      await pool.query<{ published_at: string | null }>(sql, [inserted.outbox_event_id])
+    ).rows[0];
+    expect(row.published_at).not.toBeNull();
+    expect(relay.publishedCount).toBe(1);
+
+    // Future polls are suppressed after shutdown.
+    const second = (
+      await pool.query<{ outbox_event_id: string }>(
+        `
+        INSERT INTO outbox_events (
+          outbox_event_id, event_id, event_type, schema_version,
+          aggregate_type, aggregate_id, correlation_id, producer,
+          payload, occurred_at, created_at
+        )
+        VALUES (gen_random_uuid(), gen_random_uuid(), 'test.event', '1.0.0',
+                'test', gen_random_uuid(), 'corr', 'test', '{}', now(), now())
+        RETURNING outbox_event_id
+      `
+      )
+    ).rows[0];
+
+    await relay.pump();
+
+    const untouched = (
+      await pool.query<{ claim_owner: string | null; published_at: string | null }>(
+        sql,
+        [second.outbox_event_id],
+      )
+    ).rows[0];
+    expect(untouched.claim_owner).toBeNull();
+    expect(untouched.published_at).toBeNull();
+
+    // Keep the outbox clean for the remaining tests.
+    await pool.query('DELETE FROM outbox_events WHERE outbox_event_id = $1', [
+      second.outbox_event_id,
+    ]);
   });
 
   it('hasBacklog and isReady report correctly', async () => {

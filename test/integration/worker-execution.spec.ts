@@ -647,4 +647,128 @@ describe('worker execution (real PostgreSQL)', () => {
     });
     expect(rejected.applied).toBe(false);
   });
+
+  it('task.started uses the run correlation id, with the dispatch id as causation', async () => {
+    const { workflowRunId } = await setupRun(engine, [
+      task('corr', [], { retryPolicy: { maxAttempts: 1 } }),
+    ]);
+
+    const [s] = await claimAndStart(workflowRunId);
+
+    const run = (
+      await pool.query<{ correlation_id: string }>(
+        'SELECT correlation_id FROM workflow_runs WHERE workflow_run_id = $1',
+        [workflowRunId],
+      )
+    ).rows[0];
+
+    const started = (
+      await pool.query<{ correlation_id: string | null; causation_id: string | null }>(
+        `
+        SELECT correlation_id, causation_id
+        FROM outbox_events
+        WHERE event_type = 'task.started'
+          AND workflow_run_id = $1
+        `,
+        [workflowRunId],
+      )
+    ).rows[0];
+
+    expect(started).toBeDefined();
+    // Correlation follows the RUN, not the dispatch.
+    expect(started.correlation_id).toBe(run.correlation_id);
+    expect(started.correlation_id).not.toBe(s.dispatchId);
+    // The dispatch that caused the start is recorded as causation.
+    expect(started.causation_id).toBe(s.dispatchId);
+  });
+
+  it('a completion whose attempt transition does not match aborts without committing the task change', async () => {
+    // Scenario 1: completeSuccess.
+    const run1 = await setupRun(engine, [
+      task('inconsistent-success', [], { retryPolicy: { maxAttempts: 3 } }),
+    ]);
+    const [s1] = await claimAndStart(run1.workflowRunId);
+
+    // Simulate a concurrent re-claim that already abandoned the attempt.
+    // (Impossible under the normal locks; this exercises the invariant.)
+    await pool.query(
+      `UPDATE task_attempts
+       SET state = 'ABANDONED', finished_at = now()
+       WHERE task_attempt_id = $1`,
+      [s1.attemptId],
+    );
+
+    await expect(
+      completeSuccess(database(), {
+        taskExecutionId: s1.taskExecutionId,
+        attemptId: s1.attemptId,
+        fencingToken: s1.fencingToken,
+        workerId: 'inconsistent-worker',
+        output: { should: 'not commit' },
+      }),
+    ).rejects.toThrow(/affected 0 rows/);
+
+    // The task update rolled back with the transaction.
+    const t1 = (
+      await pool.query<{ state: string }>(
+        'SELECT state FROM task_executions WHERE task_execution_id = $1',
+        [s1.taskExecutionId],
+      )
+    ).rows[0];
+    expect(t1.state).toBe('RUNNING');
+
+    // No task.succeeded event was committed.
+    const ev1 = (
+      await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM outbox_events
+         WHERE event_type = 'task.succeeded' AND workflow_run_id = $1`,
+        [run1.workflowRunId],
+      )
+    ).rows[0];
+    expect(ev1.n).toBe(0);
+
+    // Scenario 2: completeFailure (retryable path).
+    const run2 = await setupRun(engine, [
+      task('inconsistent-failure', [], { retryPolicy: { maxAttempts: 3 } }),
+    ]);
+    const [s2] = await claimAndStart(run2.workflowRunId);
+
+    await pool.query(
+      `UPDATE task_attempts
+       SET state = 'ABANDONED', finished_at = now()
+       WHERE task_attempt_id = $1`,
+      [s2.attemptId],
+    );
+
+    await expect(
+      completeFailure(database(), {
+        taskExecutionId: s2.taskExecutionId,
+        attemptId: s2.attemptId,
+        fencingToken: s2.fencingToken,
+        workerId: 'inconsistent-worker',
+        failure: { code: 'HANDLER_FAILED', message: 'boom', retryable: true },
+        attemptNumber: s2.attemptNumber,
+        maxAttempts: 3,
+        retryDelayMs: 100,
+        failurePolicy: FailurePolicy.FAIL_WORKFLOW,
+      }),
+    ).rejects.toThrow(/affected 0 rows/);
+
+    const t2 = (
+      await pool.query<{ state: string }>(
+        'SELECT state FROM task_executions WHERE task_execution_id = $1',
+        [s2.taskExecutionId],
+      )
+    ).rows[0];
+    expect(t2.state).toBe('RUNNING');
+
+    const ev2 = (
+      await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM outbox_events
+         WHERE event_type = 'task.retry_scheduled' AND workflow_run_id = $1`,
+        [run2.workflowRunId],
+      )
+    ).rows[0];
+    expect(ev2.n).toBe(0);
+  });
 });

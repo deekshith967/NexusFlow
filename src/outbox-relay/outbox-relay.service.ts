@@ -41,7 +41,10 @@ const CLAIM_SQL = `
  * - Marks published with a conditional update
  *   (WHERE published_at IS NULL AND claim_owner = self).
  * - On publication failure, increments publish_attempts, stores
- *   last_error, and releases the claim so another relay can retry.
+ *   last_error, and releases the claim — but ONLY while this relay
+ *   still owns the claim (WHERE claim_owner = self). A zero-row result
+ *   means the claim expired and another relay took over; the row is
+ *   left untouched for the new owner.
  *
  * If the relay crashes after publishing but before marking the row
  * published, the event is republished; consumers deduplicate via
@@ -102,12 +105,35 @@ export class OutboxRelayService
     this.logger.log(`Outbox relay ${this.claimOwner} started`);
   }
 
-  onApplicationShutdown(): void {
+  /**
+   * Graceful shutdown: stops future polls and waits for an in-flight
+   * publish cycle to finish, so the relay never uses the database pool
+   * or transport after they are torn down. Nest awaits the returned
+   * promise before shutting down the remaining providers.
+   */
+  async onApplicationShutdown(): Promise<void> {
     this.shutdownRequested = true;
 
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+
+    // A pump may be mid-cycle (claim committed, publish in flight). It
+    // still needs the pool (publish-mark / failure recording) and the
+    // transport, so wait for it to finish. Bounded: a wedged publish
+    // must not hang process termination; the claim TTL recovers the row.
+    const deadline = Date.now() + 30_000;
+
+    while (this.inFlight) {
+      if (Date.now() > deadline) {
+        this.logger.warn(
+          'Outbox relay shutdown: in-flight publish cycle did not finish within 30s; leaving recovery to the claim TTL',
+        );
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
   }
 
@@ -213,22 +239,35 @@ export class OutboxRelayService
       const message = (error as Error).message ?? 'unknown error';
 
       try {
-        await this.database.query(
+        // Ownership guard: only THIS relay may record the failure or
+        // release the claim. If the claim expired and another relay
+        // already reclaimed the row, this update matches zero rows —
+        // ownership was lost, and the new owner is responsible for the
+        // event. We must not clear or overwrite the new owner's claim.
+        const cleanup = await this.database.query(
           `
           UPDATE outbox_events
           SET publish_attempts = publish_attempts + 1,
-              last_error = $2,
+              last_error = $3,
               claim_owner = NULL,
               claim_expires_at = NULL
           WHERE outbox_event_id = $1
             AND published_at IS NULL
+            AND claim_owner = $2
       `,
-          [row.outbox_event_id, message.slice(0, 2000)],
+          [row.outbox_event_id, this.claimOwner, message.slice(0, 2000)],
         );
-        this.failedCount += 1;
-        this.logger.warn(
-          `Publication failed for event ${row.event_id} (${row.event_type}): ${message}`,
-        );
+
+        if ((cleanup.rowCount ?? 0) > 0) {
+          this.failedCount += 1;
+          this.logger.warn(
+            `Publication failed for event ${row.event_id} (${row.event_type}): ${message}`,
+          );
+        } else {
+          this.logger.warn(
+            `Publication failed for event ${row.event_id} (${row.event_type}) but the claim is owned by another relay; leaving the row untouched for the new owner`,
+          );
+        }
       } catch (recordError) {
         this.logger.error(
           `Could not record publication failure for ${row.event_id}: ${(recordError as Error).message}`,

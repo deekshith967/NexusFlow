@@ -53,12 +53,17 @@ export async function evaluateWorkflowCompletion(
     return run.state;
   }
 
+  // Lock all of the run's task rows in a deterministic order
+  // (task_execution_id). Transactions that reach this point already
+  // hold the run row lock, so this scan is serialized per run; the
+  // explicit order keeps lock acquisition stable regardless of plan.
   const tasks = (
     await client.query<{ task_execution_id: string; state: string; task_key: string }>(
       `
       SELECT task_execution_id, state, task_key
       FROM task_executions
       WHERE workflow_run_id = $1
+      ORDER BY task_execution_id ASC
       FOR UPDATE
     `,
       [ctx.workflowRunId],

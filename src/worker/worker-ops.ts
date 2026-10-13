@@ -33,12 +33,58 @@ export interface StartAttemptResult {
  * then transitions task -> RUNNING, attempt -> STARTED and inserts
  * task.started. A zero-row result means the dispatch is stale or
  * invalid and the handler must NOT execute.
+ *
+ * Lock ordering: workflow_runs FIRST, then task_executions, then
+ * task_attempts. Completion transactions follow the same order, so
+ * worker-vs-worker transactions on the same run serialize on the run
+ * row and cannot deadlock. (The scheduler claim locks run+task
+ * atomically with FOR UPDATE SKIP LOCKED and therefore never blocks,
+ * so it cannot participate in a cycle either.)
  */
 export async function startAttempt(
   database: DatabaseService,
   input: StartAttemptInput,
 ): Promise<StartAttemptResult> {
   return database.transaction(async (client) => {
+    // 1. Unlocked lookup to identify the run. (The attempt's
+    //    task_execution_id/workflow_run_id are immutable, so a stale
+    //    pointer is impossible; the authoritative state is re-read
+    //    under locks in step 3.)
+    const located = (
+      await client.query<{ workflow_run_id: string }>(
+        `
+        SELECT te.workflow_run_id
+        FROM task_attempts a
+        JOIN task_executions te
+          ON te.task_execution_id = a.task_execution_id
+        WHERE a.dispatch_id = $1
+      `,
+        [input.dispatchId],
+      )
+    ).rows[0];
+
+    if (!located) {
+      return { ok: false, reason: 'not_found' };
+    }
+
+    // 2. Lock the run row first (standard lock order).
+    const run = (
+      await client.query<{ state: string; correlation_id: string }>(
+        `
+        SELECT state, correlation_id
+        FROM workflow_runs
+        WHERE workflow_run_id = $1
+        FOR UPDATE
+      `,
+        [located.workflow_run_id],
+      )
+    ).rows[0];
+
+    if (!run) {
+      return { ok: false, reason: 'stale' };
+    }
+
+    // 3. Authoritative locked read of the attempt + task.
     const attempt = (
       await client.query<{
         task_attempt_id: string;
@@ -90,22 +136,6 @@ export async function startAttempt(
       return { ok: false, reason: 'stale' };
     }
 
-    const run = (
-      await client.query<{ state: string }>(
-        `
-        SELECT state
-        FROM workflow_runs
-        WHERE workflow_run_id = $1
-        FOR UPDATE
-      `,
-        [attempt.workflow_run_id],
-      )
-    ).rows[0];
-
-    if (!run) {
-      return { ok: false, reason: 'stale' };
-    }
-
     if (run.state !== 'RUNNING') {
       // The run is terminal: no authoritative execution is possible.
       // Abandon the attempt so the record resolves.
@@ -146,7 +176,10 @@ export async function startAttempt(
       return { ok: false, reason: 'lease_expired' };
     }
 
-    await client.query(
+    // The attempt row is locked (step 3); the transition must affect
+    // exactly one row or the transaction is inconsistent — abort so
+    // task and attempt cannot commit different outcomes.
+    const started = await client.query(
       `
       UPDATE task_attempts
       SET state = 'STARTED',
@@ -158,6 +191,15 @@ export async function startAttempt(
       [attempt.task_attempt_id, input.workerId],
     );
 
+    if (started.rowCount !== 1) {
+      throw new Error(
+        `Attempt ${attempt.task_attempt_id} state transition to STARTED affected ${started.rowCount} rows; aborting start transaction`,
+      );
+    }
+
+    // task.started correlates with the WORKFLOW RUN's correlation_id
+    // (the run-level trace identifier); the dispatch that caused this
+    // start is recorded as causation.
     await insertOutboxEvent(client, {
       eventType: OutboxEventType.TaskStarted,
       aggregateType: 'task_execution',
@@ -165,7 +207,7 @@ export async function startAttempt(
       workflowRunId: attempt.workflow_run_id,
       taskExecutionId: attempt.task_execution_id,
       taskAttemptId: attempt.task_attempt_id,
-      correlationId: attempt.dispatch_id,
+      correlationId: run.correlation_id,
       causationId: attempt.dispatch_id,
       producer: `nexusflow/worker:${input.workerId}`,
       payload: {
@@ -306,6 +348,15 @@ async function attemptDispatchId(
  * algorithm — all in one transaction. A stale or duplicate report
  * affects zero rows (or the run is no longer RUNNING) and returns the
  * already-committed outcome without repeating activation.
+ *
+ * Lock ordering: workflow_runs first (loadRunContext holds the run row
+ * lock), then task_executions, then task_attempts — matching the
+ * start path so concurrent worker transactions serialize on the run.
+ *
+ * Invariant: after the task state update, the matching attempt
+ * transition MUST affect exactly one row; otherwise the transaction is
+ * aborted so a task and its attempt cannot commit inconsistent
+ * outcomes.
  */
 export async function completeSuccess(
   database: DatabaseService,
@@ -376,7 +427,7 @@ export async function completeSuccess(
       };
     }
 
-    await client.query(
+    const attemptResult = await client.query(
       `
       UPDATE task_attempts
       SET state = 'SUCCEEDED',
@@ -387,6 +438,12 @@ export async function completeSuccess(
     `,
       [input.attemptId, outputJson],
     );
+
+    if (attemptResult.rowCount !== 1) {
+      throw new Error(
+        `Attempt ${input.attemptId} transition to SUCCEEDED affected ${attemptResult.rowCount} rows; aborting completion transaction`,
+      );
+    }
 
     const dispatchId = await attemptDispatchId(client, input.attemptId);
 
@@ -447,6 +504,14 @@ export interface CompleteFailureInput extends CommonReportInput {
  * (FAIL_WORKFLOW -> FAILED, SKIP_DOWNSTREAM -> SKIPPED), then activates
  * or blocks downstream tasks and evaluates workflow completion — all in
  * one transaction.
+ *
+ * Lock ordering: workflow_runs first (loadRunContext), then
+ * task_executions, then task_attempts — matching the start path.
+ *
+ * Invariant: after the task state update, the matching attempt
+ * transition MUST affect exactly one row; otherwise the transaction is
+ * aborted so a task and its attempt cannot commit inconsistent
+ * outcomes.
  */
 export async function completeFailure(
   database: DatabaseService,
@@ -575,7 +640,7 @@ export async function completeFailure(
       taskState = terminalState;
     }
 
-    await client.query(
+    const attemptResult = await client.query(
       `
       UPDATE task_attempts
       SET state = $2,
@@ -592,6 +657,12 @@ export async function completeFailure(
         input.failure.message,
       ],
     );
+
+    if (attemptResult.rowCount !== 1) {
+      throw new Error(
+        `Attempt ${input.attemptId} transition to ${input.failure.timedOut ? 'TIMED_OUT' : 'FAILED'} affected ${attemptResult.rowCount} rows; aborting completion transaction`,
+      );
+    }
 
     const dispatchId = await attemptDispatchId(client, input.attemptId);
 

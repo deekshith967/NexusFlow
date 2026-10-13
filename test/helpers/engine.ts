@@ -139,7 +139,9 @@ export async function createEngine(
 
     async stop() {
       scheduler.onApplicationShutdown();
-      relay.onApplicationShutdown();
+      // Await: waits for an in-flight publish cycle so the transport
+      // below is not closed out from under it.
+      await relay.onApplicationShutdown();
       worker.onApplicationShutdown();
       await transport.close();
     },
