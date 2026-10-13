@@ -13,7 +13,9 @@
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
-    "lint": "eslint \"{src,test}/**/*.ts\""
+    "lint": "eslint \"{src,test}/**/*.ts\"",
+    "demo": "ts-node --files scripts/e2e-demo.ts",
+    "migrate": "ts-node --files scripts/migrate.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",

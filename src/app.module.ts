@@ -5,6 +5,7 @@ import { DatabaseModule } from './database/database.module';
 import { OutboxRelayModule } from './outbox-relay/outbox-relay.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { TransportModule } from './transport/transport.module';
+import { WorkflowApiModule } from './workflow/api/workflow-api.module';
 import { WorkflowModule } from './workflow/workflow.module';
 import { WorkerModule } from './worker/worker.module';
 
@@ -24,6 +25,7 @@ import { WorkerModule } from './worker/worker.module';
     DatabaseModule,
     TransportModule,
     WorkflowModule,
+    WorkflowApiModule,
     SchedulerModule,
     WorkerModule,
     OutboxRelayModule,

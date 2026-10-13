@@ -5,6 +5,7 @@ import { Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { loadEnvConfig } from './config/env';
 import { checkDatabaseReachable } from './database/migrations/applier';
+import { ApiExceptionsFilter } from './workflow/api/exception-filter';
 
 const logger = new Logger('Bootstrap');
 
@@ -19,6 +20,7 @@ async function bootstrap(): Promise<void> {
 
   const app = await NestFactory.create(AppModule);
   app.enableShutdownHooks();
+  app.useGlobalFilters(new ApiExceptionsFilter());
 
   if (config.role === 'api' || config.role === 'all') {
     app.setGlobalPrefix('', { exclude: [] });

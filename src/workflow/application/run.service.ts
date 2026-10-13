@@ -518,7 +518,7 @@ export class RunService {
       const owner = client
         .query<{ runTenant: string }>(
           `
-          SELECT wr.tenant_id AS runTenant
+          SELECT wr.tenant_id AS "runTenant"
           FROM task_executions te
           JOIN workflow_runs wr
             ON wr.workflow_run_id = te.workflow_run_id
