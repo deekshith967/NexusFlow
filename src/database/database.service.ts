@@ -10,6 +10,14 @@ import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 export class DatabaseService implements OnApplicationShutdown {
   constructor(@Inject(Pool) private readonly pool: Pool) {}
 
+  /**
+   * Readiness probe: verifies the pool can reach the database.
+   * Throws when the database is unreachable.
+   */
+  async checkHealth(): Promise<void> {
+    await this.pool.query('SELECT 1');
+  }
+
   query<R extends QueryResultRow = QueryResultRow>(
     text: string,
     values: readonly unknown[] = [],

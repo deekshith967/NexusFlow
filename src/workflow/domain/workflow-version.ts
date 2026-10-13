@@ -1,5 +1,4 @@
-import { createHash } from 'node:crypto';
-
+import { computeDefinitionHash } from './definition-hash';
 import { DagValidator } from './dag-validator';
 import { InvalidWorkflowVersionTransitionError } from './workflow-errors';
 import {
@@ -77,10 +76,9 @@ export class WorkflowVersion {
 
   this.validator.validate(this.definitionValue);
 
-  this.definitionHashValue = calculateDefinitionHash(this.definitionValue);
+  this.definitionHashValue = computeDefinitionHash(this.definitionValue);
 
   this.stateValue = WorkflowVersionState.PUBLISHED;
-
 }
 
   discard(): void {
@@ -113,10 +111,4 @@ function cloneDefinition(
   definition: WorkflowDefinition,
 ): WorkflowDefinition {
   return structuredClone(definition);
-}
-
-function calculateDefinitionHash(definition: WorkflowDefinition): string {
-  const canonical = JSON.stringify(definition);
-
-  return createHash('sha256').update(canonical).digest('hex');
 }

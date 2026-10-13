@@ -11,6 +11,7 @@ import { WorkflowDefinition } from '../../src/workflow/domain/workflow-definitio
 function task(
   taskKey: string,
   dependencies: readonly string[] = [],
+  overrides: Partial<WorkflowDefinition['tasks'][number]> = {},
 ): WorkflowDefinition['tasks'][number] {
   return {
     taskKey,
@@ -23,6 +24,7 @@ function task(
     timeoutMs: 1_000,
     failurePolicy: FailurePolicy.FAIL_WORKFLOW,
     dependencies,
+    ...overrides,
   };
 }
 
@@ -267,4 +269,39 @@ describe('WorkflowVersion', () => {
 
   expect(version.state).toBe(WorkflowVersionState.DRAFT);
 });
+});
+
+describe('DagValidator Phase 1 failure policy', () => {
+  const validator = new DagValidator();
+
+  it('accepts FAIL_WORKFLOW and SKIP_DOWNSTREAM', () => {
+    expect(() =>
+      validator.validate(
+        definition([
+          task('a', [], { failurePolicy: FailurePolicy.FAIL_WORKFLOW }),
+          task('b', ['a'], { failurePolicy: FailurePolicy.SKIP_DOWNSTREAM }),
+        ]),
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects IGNORE_FAILURE (not a valid Phase 1 policy)', () => {
+    expect(() =>
+      validator.validate(
+        definition([
+          task('a', [], { failurePolicy: 'IGNORE_FAILURE' as never }),
+        ]),
+      ),
+    ).toThrow(WorkflowValidationError);
+  });
+
+  it('rejects a non-integer retry delay', () => {
+    expect(() =>
+      validator.validate(
+        definition([
+          task('a', [], { retryPolicy: { maxAttempts: 2, retryDelayMs: 1.5 } }),
+        ]),
+      ),
+    ).toThrow(WorkflowValidationError);
+  });
 });

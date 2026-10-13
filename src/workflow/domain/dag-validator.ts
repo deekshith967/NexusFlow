@@ -1,3 +1,4 @@
+import { FailurePolicy } from './failure-policy';
 import {
   TaskDefinition,
   WorkflowDefinition,
@@ -78,9 +79,28 @@ export class DagValidator {
       );
     }
 
+    if (
+      task.retryPolicy.retryDelayMs !== undefined &&
+      (!Number.isInteger(task.retryPolicy.retryDelayMs) ||
+        task.retryPolicy.retryDelayMs < 0)
+    ) {
+      throw new WorkflowValidationError(
+        `Retry retryDelayMs must be a non-negative integer for task '${task.taskKey}'`,
+      );
+    }
+
     if (!Number.isInteger(task.timeoutMs) || task.timeoutMs <= 0) {
       throw new WorkflowValidationError(
         `Timeout must be a positive integer for task '${task.taskKey}'`,
+      );
+    }
+
+    if (
+      task.failurePolicy !== FailurePolicy.FAIL_WORKFLOW &&
+      task.failurePolicy !== FailurePolicy.SKIP_DOWNSTREAM
+    ) {
+      throw new WorkflowValidationError(
+        `Failure policy must be FAIL_WORKFLOW or SKIP_DOWNSTREAM for task '${task.taskKey}' (got '${String(task.failurePolicy)}'); IGNORE_FAILURE is not a valid Phase 1 policy`,
       );
     }
   }
