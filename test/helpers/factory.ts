@@ -21,8 +21,14 @@ export function createRunService(pool: Pool): RunService {
 
 export function task(
   taskKey: string,
+  dependenciesOrOptions: readonly string[] | Partial<TaskDefinition> = [],
   options: Partial<TaskDefinition> = {},
 ): TaskDefinition {
+  // Accept either `task(key, deps)` or `task(key, { dependencies, ...opts })`.
+  const merged: Partial<TaskDefinition> = Array.isArray(dependenciesOrOptions)
+    ? { dependencies: dependenciesOrOptions, ...options }
+    : { ...dependenciesOrOptions, ...options };
+
   return {
     taskKey,
     handlerType: 'echo',
@@ -34,7 +40,7 @@ export function task(
     timeoutMs: 10_000,
     failurePolicy: FailurePolicy.FAIL_WORKFLOW,
     dependencies: [],
-    ...options,
+    ...merged,
   };
 }
 
