@@ -30,7 +30,7 @@ function gatedTransport(failAfterRelease: boolean, errorMessage: string) {
 
   const transport: MessageTransport = {
     kind: 'memory',
-    ensureTopics: async () => undefined,
+    ensureTopics: () => Promise.resolve(),
     publisher: {
       publish: async () => {
         await gate;
@@ -38,14 +38,14 @@ function gatedTransport(failAfterRelease: boolean, errorMessage: string) {
           throw new Error(errorMessage);
         }
       },
-      isReady: async () => true,
-      close: async () => undefined,
+      isReady: () => Promise.resolve(true),
+      close: () => Promise.resolve(),
     },
     consumer: {
-      subscribe: async () => undefined,
-      close: async () => undefined,
+      subscribe: () => Promise.resolve(),
+      close: () => Promise.resolve(),
     },
-    close: async () => undefined,
+    close: () => Promise.resolve(),
   };
 
   return { transport, release: () => release() };
@@ -532,9 +532,12 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
     const shutdownP = relay.onApplicationShutdown();
     let shutdownReturned = false;
 
-    shutdownP.then(() => {
-      shutdownReturned = true;
-    });
+    void shutdownP.then(
+      () => {
+        shutdownReturned = true;
+      },
+      () => undefined,
+    );
 
     // The publish is still blocked: shutdown cannot have returned.
     await new Promise((r) => setTimeout(r, 100));
@@ -589,7 +592,7 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
     let publishCalls = 0;
     const stuckTransport: MessageTransport = {
       kind: 'memory',
-      ensureTopics: async () => undefined,
+      ensureTopics: () => Promise.resolve(),
       publisher: {
         publish: async () => {
           publishCalls += 1;
@@ -597,14 +600,14 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
             /* never resolves */
           });
         },
-        isReady: async () => true,
-        close: async () => undefined,
+        isReady: () => Promise.resolve(true),
+        close: () => Promise.resolve(),
       },
       consumer: {
-        subscribe: async () => undefined,
-        close: async () => undefined,
+        subscribe: () => Promise.resolve(),
+        close: () => Promise.resolve(),
       },
-      close: async () => undefined,
+      close: () => Promise.resolve(),
     };
 
     const relay = new OutboxRelayService(
@@ -648,9 +651,12 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
     const shutdownP = relay.onApplicationShutdown();
     let shutdownReturned = false;
 
-    shutdownP.then(() => {
-      shutdownReturned = true;
-    });
+    void shutdownP.then(
+      () => {
+        shutdownReturned = true;
+      },
+      () => undefined,
+    );
 
     // While the stuck publish is still in flight, shutdown must NOT
     // have returned — and the row must still be claimed (the relay has
@@ -673,6 +679,10 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
     await shutdownP;
     const elapsed = Date.now() - startedAt;
     expect(elapsed).toBeLessThan(5_000);
+
+    // The in-flight pump drained as part of shutdown; observe its
+    // completion so a failure surfaces instead of floating.
+    await pumpP;
 
     // The relay stopped waiting for the wedged publish, recorded the
     // failure, and released the claim: the event is durable and
