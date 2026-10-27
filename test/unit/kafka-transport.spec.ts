@@ -45,6 +45,7 @@ function config(): EnvConfig {
     role: 'all',
     transport: 'kafka',
     databaseUrl: 'unused',
+    databaseSsl: false,
     port: 0,
     defaultTenantId: '00000000-0000-0000-0000-000000000000',
     serviceId: 'kafka-test',

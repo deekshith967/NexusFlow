@@ -59,6 +59,7 @@ export interface CreateDraftVersionInput {
 }
 
 export interface UpdateDraftDefinitionInput {
+  readonly tenantId: string;
   readonly workflowVersionId: string;
   readonly definition: WorkflowDefinition;
 }
@@ -196,6 +197,8 @@ export class WorkflowService {
       throw new WorkflowVersionNotFoundError(input.workflowVersionId);
     }
 
+    assertVersionTenant(existing.version, input.tenantId);
+
     if (existing.version.state !== WorkflowVersionState.DRAFT) {
       if (existing.version.state === WorkflowVersionState.PUBLISHED) {
         throw new PublishedWorkflowVersionImmutableError();
@@ -219,6 +222,7 @@ export class WorkflowService {
   }
 
   async getValidationReport(
+    tenantId: string,
     workflowVersionId: string,
   ): Promise<ValidationReport> {
     const definition = await this.database.transaction((client) =>
@@ -229,6 +233,8 @@ export class WorkflowService {
       throw new WorkflowVersionNotFoundError(workflowVersionId);
     }
 
+    assertVersionTenant(definition.version, tenantId);
+
     const errors = collectValidationErrors(
       this.validator,
       domainDefinitionFrom(definition),
@@ -237,13 +243,18 @@ export class WorkflowService {
     return { valid: errors.length === 0, errors };
   }
 
-  async publish(workflowVersionId: string): Promise<WorkflowVersionRow> {
+  async publish(
+    tenantId: string,
+    workflowVersionId: string,
+  ): Promise<WorkflowVersionRow> {
     const version = await this.database.transaction(async (client) => {
       const definition = await loadVersionDefinition(client, workflowVersionId, true);
 
       if (!definition) {
         throw new WorkflowVersionNotFoundError(workflowVersionId);
       }
+
+      assertVersionTenant(definition.version, tenantId);
 
       if (definition.version.state !== WorkflowVersionState.DRAFT) {
         throw new InvalidWorkflowVersionTransitionError(
@@ -303,13 +314,18 @@ export class WorkflowService {
     return version;
   }
 
-  async retire(workflowVersionId: string): Promise<WorkflowVersionRow> {
+  async retire(
+    tenantId: string,
+    workflowVersionId: string,
+  ): Promise<WorkflowVersionRow> {
     const version = await this.database.transaction(async (client) => {
       const existing = await findWorkflowVersionForUpdate(client, workflowVersionId);
 
       if (!existing) {
         throw new WorkflowVersionNotFoundError(workflowVersionId);
       }
+
+      assertVersionTenant(existing, tenantId);
 
       if (existing.state !== WorkflowVersionState.PUBLISHED) {
         throw new InvalidWorkflowVersionTransitionError(
@@ -349,13 +365,18 @@ export class WorkflowService {
     return version;
   }
 
-  async discard(workflowVersionId: string): Promise<WorkflowVersionRow> {
+  async discard(
+    tenantId: string,
+    workflowVersionId: string,
+  ): Promise<WorkflowVersionRow> {
     const version = await this.database.transaction(async (client) => {
       const existing = await findWorkflowVersionForUpdate(client, workflowVersionId);
 
       if (!existing) {
         throw new WorkflowVersionNotFoundError(workflowVersionId);
       }
+
+      assertVersionTenant(existing, tenantId);
 
       if (existing.state !== WorkflowVersionState.DRAFT) {
         throw new InvalidWorkflowVersionTransitionError(
@@ -379,7 +400,10 @@ export class WorkflowService {
     return version;
   }
 
-  async getVersion(workflowVersionId: string): Promise<VersionDefinition> {
+  async getVersion(
+    tenantId: string,
+    workflowVersionId: string,
+  ): Promise<VersionDefinition> {
     const definition = await this.database.transaction((client) =>
       loadVersionDefinition(client, workflowVersionId, false),
     );
@@ -388,10 +412,19 @@ export class WorkflowService {
       throw new WorkflowVersionNotFoundError(workflowVersionId);
     }
 
+    assertVersionTenant(definition.version, tenantId);
+
     return definition;
   }
 
-  async listVersions(workflowId: string): Promise<WorkflowVersionRow[]> {
+  async listVersions(
+    tenantId: string,
+    workflowId: string,
+  ): Promise<WorkflowVersionRow[]> {
+    // Verify the workflow belongs to the tenant first (404 otherwise),
+    // then list its versions.
+    await this.getWorkflow(tenantId, workflowId);
+
     return this.database.transaction((client) =>
       listWorkflowVersions(client, workflowId),
     );
@@ -401,6 +434,20 @@ export class WorkflowService {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Tenant isolation for version-scoped operations. A version owned by a
+ * different tenant is reported as not found (404 at the API boundary),
+ * revealing nothing about its existence or state.
+ */
+function assertVersionTenant(
+  version: WorkflowVersionRow,
+  tenantId: string,
+): void {
+  if (version.tenant_id !== tenantId) {
+    throw new WorkflowVersionNotFoundError(version.workflow_version_id);
+  }
+}
 
 function toInsertTasks(
   definition: WorkflowDefinition,

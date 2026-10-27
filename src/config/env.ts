@@ -13,6 +13,13 @@ export interface EnvConfig {
   readonly role: AppRole;
   readonly transport: TransportKind;
   readonly databaseUrl: string;
+  /**
+   * Whether the PostgreSQL connection uses TLS. Explicit
+   * `DATABASE_SSL=true/false` wins; otherwise auto-detected from
+   * `sslmode`/`ssl` parameters in DATABASE_URL (managed providers such
+   * as Render require TLS).
+   */
+  readonly databaseSsl: boolean;
   readonly kafka: KafkaConfig;
   readonly port: number;
   readonly defaultTenantId: string;
@@ -66,6 +73,52 @@ function parseRole(value: string | undefined): AppRole {
   return role as AppRole;
 }
 
+/**
+ * Resolves whether a PostgreSQL connection string needs TLS
+ * (explicit DATABASE_SSL override, else sslmode/ssl auto-detect).
+ * Used by code paths that only carry the connection string (migration
+ * applier, startup reachability check).
+ */
+export function resolveDatabaseSsl(
+  databaseUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return parseDatabaseSsl(env.DATABASE_SSL, databaseUrl);
+}
+
+function parseDatabaseSsl(
+  value: string | undefined,
+  databaseUrl: string,
+): boolean {
+  if (value !== undefined && value.trim() !== '') {
+    const normalized = value.trim().toLowerCase();
+
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
+      return true;
+    }
+
+    if (normalized === 'false' || normalized === '0' || normalized === 'no') {
+      return false;
+    }
+
+    throw new Error(`DATABASE_SSL must be 'true' or 'false', got '${value}'`);
+  }
+
+  // Auto-detect: managed PostgreSQL URLs commonly carry ?sslmode=require
+  // (or ?ssl=true). An explicit sslmode=disable keeps TLS off.
+  const query = `?${databaseUrl.split('?', 2)[1] ?? ''}`;
+
+  if (/(?:^|[?&])sslmode=(require|prefer|verify-ca|verify-full)\b/i.test(query)) {
+    return true;
+  }
+
+  if (/(?:^|[?&])ssl=(true|1|require)\b/i.test(query)) {
+    return true;
+  }
+
+  return false;
+}
+
 function parseTransport(value: string | undefined): TransportKind {
   const transport = (value ?? 'kafka').trim();
 
@@ -95,9 +148,14 @@ export function loadEnvConfig(
   const role = parseRole(env.NEXUSFLOW_ROLE);
   const transport = parseTransport(env.NEXUSFLOW_TRANSPORT);
 
-  if (transport === 'memory' && role === 'worker') {
+  if (transport === 'memory' && (role === 'worker' || role === 'outbox-relay')) {
+    // The in-memory transport shares no state across processes. A
+    // separate worker could never receive dispatches, and a separate
+    // relay would publish into the void while marking events published
+    // (silent non-delivery); both roles must use Kafka outside the
+    // single-process 'all' role.
     throw new Error(
-      'NEXUSFLOW_TRANSPORT=memory is only valid for single-process roles (api/all) or tests; a separate worker process requires Kafka',
+      'NEXUSFLOW_TRANSPORT=memory is only valid for single-process roles (api/all) or tests; separate worker and outbox-relay processes require Kafka',
     );
   }
 
@@ -123,6 +181,7 @@ export function loadEnvConfig(
     role,
     transport,
     databaseUrl,
+    databaseSsl: parseDatabaseSsl(env.DATABASE_SSL, databaseUrl),
     port: parsePositiveInt(env.PORT, 3000, 'PORT'),
     defaultTenantId,
     serviceId,

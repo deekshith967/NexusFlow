@@ -52,6 +52,7 @@ export function baseConfig(options: BaseConfigOptions = {}): EnvConfig {
     role: 'all',
     transport: 'memory',
     databaseUrl: 'unused',
+    databaseSsl: false,
     port: 0,
     defaultTenantId: '00000000-0000-0000-0000-000000000000',
     serviceId: 'test',
@@ -187,7 +188,7 @@ export async function setupRun(
     definition: input?.workflow ?? definition([...tasks]),
   });
 
-  await engine.workflows.publish(version.workflow_version_id);
+  await engine.workflows.publish(tenantId, version.workflow_version_id);
 
   const result = await engine.runs.startRun({
     tenantId,

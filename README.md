@@ -44,13 +44,17 @@ NexusFlow does **not** claim exactly-once task execution or exactly-once externa
 ```text
 .
 ├── AGENTS.md
-├── docs/architecture/final-architecture-contract.md
+├── Dockerfile                # multi-stage production image (all roles)
+├── render.yaml               # Render blueprint: managed PG + one service per role
+├── docs/
+│   ├── architecture/final-architecture-contract.md
+│   └── adr/                  # architecture decision records
 ├── scripts/
-│   ├── migrate.ts            # apply migrations (npm run migrate)
 │   └── e2e-demo.ts           # executable end-to-end demo (npm run demo)
 ├── src/
 │   ├── app.module.ts         # role-gated single application
 │   ├── main.ts               # bootstrap: DB check, HTTP for api/all roles
+│   ├── migrate.ts            # migration CLI (npm run migrate / migrate:prod)
 │   ├── config/               # env parsing + validation (loadEnvConfig)
 │   ├── database/             # Pool provider, DatabaseService, migrations + applier
 │   ├── outbox/               # outbox event types, repository, relay module/service
@@ -92,10 +96,21 @@ Migrations are idempotent and tracked in `schema_migrations`:
 
 ```bash
 export DATABASE_URL='postgres://user:password@127.0.0.1:5432/nexusflow'
-npm run migrate
+npm run migrate          # development: runs the TypeScript source via ts-node
 ```
 
-`npm run demo` also applies migrations automatically.
+From compiled output (production, no dev dependencies needed — the
+migration SQL is packaged into `dist/` by the build):
+
+```bash
+npm run build
+npm run migrate:prod     # runs node dist/migrate.js
+```
+
+Run migrations once per deploy, from a single process: concurrent
+migrates are not coordinated. The migrator honors `DATABASE_SSL` /
+`sslmode=require`, so it works against managed PostgreSQL that
+requires TLS. `npm run demo` also applies migrations automatically.
 
 ## Configuration
 
@@ -104,6 +119,7 @@ Copy `.env.example` to `.env` (or export the variables) and adjust. Key variable
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DATABASE_URL` | — (required) | PostgreSQL connection string |
+| `DATABASE_SSL` | auto-detect | `true` \| `false`; when unset, TLS is auto-detected from `sslmode`/`ssl` parameters in `DATABASE_URL`. Required (`true`) for managed PostgreSQL that mandates TLS. |
 | `NEXUSFLOW_ROLE` | `api` | `api` \| `scheduler` \| `worker` \| `outbox-relay` \| `all` |
 | `NEXUSFLOW_TRANSPORT` | `memory` | `kafka` \| `memory` (memory is rejected for the `worker` role) |
 | `PORT` | `3000` | HTTP port for `api`/`all` roles |
@@ -155,6 +171,53 @@ NEXUSFLOW_ROLE=outbox-relay node dist/main.js
 
 Run `npm run build` first. All roles share the same codebase; roles are selected at bootstrap.
 
+## Deploying
+
+### Docker
+
+The multi-stage `Dockerfile` builds a production image (compiled `dist/`
+plus production-only dependencies; no `ts-node`, no dev dependencies).
+The same image serves every role:
+
+```bash
+docker build -t nexusflow .
+docker run --rm -e DATABASE_URL='...' nexusflow node dist/migrate.js
+docker run -d -p 3000:3000 -e DATABASE_URL='...' -e NEXUSFLOW_ROLE=api nexusflow
+# ... one container per role (api, scheduler, worker, outbox-relay),
+# all with NEXUSFLOW_TRANSPORT=kafka and KAFKA_BOOTSTRAP_SERVERS set.
+```
+
+> Note: the `Dockerfile` is provided as reviewed, unexecuted
+> infrastructure — no Docker daemon is available in this environment, so
+> `docker build` has not been run here. Validate it in CI before
+> depending on it.
+
+### Render
+
+`render.yaml` is a Render Blueprint provisioning managed PostgreSQL plus
+one service per NexusFlow role (web `api` with `GET /health/ready` as
+the health check; background workers for `scheduler`, `worker`, and
+`outbox-relay`). Notes:
+
+- Set `KAFKA_BOOTSTRAP_SERVERS` in the dashboard to an **external**
+  broker (Render has no managed Kafka). Multi-process deployments
+  require Kafka; the `worker` and `outbox-relay` roles refuse to boot
+  with `NEXUSFLOW_TRANSPORT=memory`.
+- Migrations run once per deploy via the `api` service's
+  `preDeployCommand` (`npm run migrate:prod`). Do not add it to the
+  other services — concurrent migrates are not coordinated.
+- `DATABASE_SSL=true` is set on every service because Render's managed
+  PostgreSQL requires TLS.
+- The blueprint uses free plans so it can be applied for evaluation;
+  free services sleep when idle, which stops the scheduler, worker,
+  and relay. Use paid plans for always-on production roles.
+
+> Note: the blueprint has been syntax/structure-validated but not
+> applied to a Render account from here — no credentials or live
+> service are claimed. The first real deploy remains the verification
+> step for the Render path (and for Kafka-backed multi-process
+> operation in general — see [Limitations](#limitations)).
+
 ## HTTP API
 
 Tenants are selected with the `X-Tenant-Id` header (UUID), defaulting to `NEXUSFLOW_DEFAULT_TENANT_ID`.
@@ -177,7 +240,7 @@ Tenants are selected with the `X-Tenant-Id` header (UUID), defaulting to `NEXUSF
 | `GET /runs/:workflowRunId/tasks` | Task executions | 200 | 404 |
 | `GET /runs/:workflowRunId/tasks/:taskExecutionId/attempts` | Attempt history | 200 | 404 |
 | `GET /health` | Liveness | 200 | — |
-| `GET /health/ready` | Readiness (checks PostgreSQL) | 200 `ready`/`not_ready` | — |
+| `GET /health/ready` | Readiness (checks PostgreSQL) | 200 `ready` / 503 `not_ready` (database down) | — |
 
 Task body shape:
 
@@ -242,7 +305,12 @@ Suite overview (at the current HEAD):
 | Suite | Type | What it proves |
 | --- | --- | --- |
 | `test/workflow/workflow-domain.spec.ts` | unit | DAG validation, version state machine, failure policies |
+| `test/unit/env.spec.ts` | unit | env parsing/validation: defaults, DATABASE_URL, role/transport, memory guard for worker + outbox-relay, tenant UUID, tuning ints, DATABASE_SSL explicit/auto-detect/override |
+| `test/unit/health.controller.spec.ts` | unit | liveness plus the readiness status contract: 200 `ready` vs 503 `not_ready` when PostgreSQL is down (no database needed) |
 | `test/unit/kafka-transport.spec.ts` | unit (mocked `kafkajs`) | client/producer/consumer wiring, topic bootstrap + already-exists tolerance, message mapping, crash reconnect, shutdown |
+| `test/database/database.module.spec.ts` | unit | pool error handler never leaks driver diagnostics to logs |
+| `test/database/database.service.spec.ts` | unit (mocked `pg` pool) | query delegation, transaction commit/rollback/release paths, pool shutdown |
+| `test/database/migrations-applier.spec.ts` | unit (mocked `pg`) | migration-directory resolution; TLS-aware reachability check (explicit DATABASE_SSL, sslmode auto-detect, plain local) |
 | `test/app.module.spec.ts` | unit | module compilation, pool shutdown |
 | `test/integration/workflow-lifecycle.spec.ts` | **real PostgreSQL** | identity uniqueness incl. concurrent conflicts, draft creation, invalid-DAG rejection, publication atomicity + events, immutability, idempotent run start, task initialization |
 | `test/integration/scheduler-claim.spec.ts` | **real PostgreSQL** | claim selection (READY/due RETRY_WAIT/expired lease), atomicity, fencing increment, concurrency (two schedulers, no double claim) |

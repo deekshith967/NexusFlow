@@ -1,0 +1,124 @@
+# Render Blueprint for NexusFlow (see README "Deploying to Render").
+#
+# Provisions managed PostgreSQL plus one service per NexusFlow role.
+# Kafka is NOT provisioned here (Render has no managed Kafka): set
+# KAFKA_BOOTSTRAP_SERVERS in the dashboard to an external broker
+# (e.g. Upstash, Confluent Cloud, Redpanda Cloud) before deploying.
+# The free plans below sleep when idle; use paid plans for always-on
+# production roles (a sleeping scheduler/worker/relay stops processing).
+
+services:
+  - type: web
+    name: nexusflow-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    # Migrations run ONCE per deploy, from the api service only. Do not
+    # copy this to the other services: concurrent migrates are not
+    # coordinated and would fail the deploy.
+    preDeployCommand: npm run migrate:prod
+    startCommand: node dist/main.js
+    healthCheckPath: /health/ready
+    envVars:
+      - key: NEXUSFLOW_ROLE
+        value: api
+      - key: NEXUSFLOW_TRANSPORT
+        value: kafka
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nexusflow-db
+          property: connectionString
+      - key: DATABASE_SSL
+        value: "true"
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false
+      - key: NEXUSFLOW_DISPATCH_TOPIC
+        value: nexusflow.task.dispatch
+      - key: NEXUSFLOW_LIFECYCLE_TOPIC
+        value: nexusflow.workflow.events
+      - key: NEXUSFLOW_WORKER_GROUP
+        value: nexusflow-workers
+
+  - type: worker
+    name: nexusflow-scheduler
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/main.js
+    envVars:
+      - key: NEXUSFLOW_ROLE
+        value: scheduler
+      - key: NEXUSFLOW_TRANSPORT
+        value: kafka
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nexusflow-db
+          property: connectionString
+      - key: DATABASE_SSL
+        value: "true"
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false
+      - key: NEXUSFLOW_DISPATCH_TOPIC
+        value: nexusflow.task.dispatch
+      - key: NEXUSFLOW_LIFECYCLE_TOPIC
+        value: nexusflow.workflow.events
+      - key: NEXUSFLOW_WORKER_GROUP
+        value: nexusflow-workers
+
+  - type: worker
+    name: nexusflow-worker
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/main.js
+    envVars:
+      - key: NEXUSFLOW_ROLE
+        value: worker
+      - key: NEXUSFLOW_TRANSPORT
+        value: kafka
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nexusflow-db
+          property: connectionString
+      - key: DATABASE_SSL
+        value: "true"
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false
+      - key: NEXUSFLOW_DISPATCH_TOPIC
+        value: nexusflow.task.dispatch
+      - key: NEXUSFLOW_LIFECYCLE_TOPIC
+        value: nexusflow.workflow.events
+      - key: NEXUSFLOW_WORKER_GROUP
+        value: nexusflow-workers
+
+  - type: worker
+    name: nexusflow-relay
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/main.js
+    envVars:
+      - key: NEXUSFLOW_ROLE
+        value: outbox-relay
+      - key: NEXUSFLOW_TRANSPORT
+        value: kafka
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nexusflow-db
+          property: connectionString
+      - key: DATABASE_SSL
+        value: "true"
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false
+      - key: NEXUSFLOW_DISPATCH_TOPIC
+        value: nexusflow.task.dispatch
+      - key: NEXUSFLOW_LIFECYCLE_TOPIC
+        value: nexusflow.workflow.events
+      - key: NEXUSFLOW_WORKER_GROUP
+        value: nexusflow-workers
+
+databases:
+  - name: nexusflow-db
+    plan: free
+    databaseName: nexusflow
+    user: nexusflow

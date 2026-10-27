@@ -2,7 +2,18 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { Pool, type QueryResultRow } from 'pg';
 
+import { resolveDatabaseSsl } from '../../config/env';
 import { configurePgTypeParsers } from '../parsers';
+
+function poolFor(connectionString: string, max: number): Pool {
+  return new Pool({
+    connectionString,
+    max,
+    ssl: resolveDatabaseSsl(connectionString)
+      ? { rejectUnauthorized: false }
+      : undefined,
+  });
+}
 
 export interface MigrationResult {
   readonly filename: string;
@@ -25,7 +36,7 @@ export async function applyMigrations(
     .sort((a, b) => a.localeCompare(b));
 
   configurePgTypeParsers();
-  const pool = new Pool({ connectionString, max: 1 });
+  const pool = poolFor(connectionString, 1);
 
   try {
     await pool.query(`
@@ -79,7 +90,10 @@ export async function applyMigrations(
 export async function checkDatabaseReachable(
   connectionString: string,
 ): Promise<string> {
-  const pool = new Pool({ connectionString, max: 1 });
+  // TLS-aware pool: the boot-time reachability check (main.ts) and the
+  // migrate script must honor DATABASE_SSL / sslmode=require, or startup
+  // fails against managed PostgreSQL that requires TLS.
+  const pool = poolFor(connectionString, 1);
 
   try {
     const result = await pool.query<QueryResultRow>('SELECT 1 AS ok');
@@ -96,13 +110,19 @@ export async function checkDatabaseReachable(
   }
 }
 
-function resolveMigrationsDir(migrationsDir?: string): string {
+/**
+ * Locates the directory holding the numbered `*.sql` migrations.
+ * Exported for unit testing; `applyMigrations` uses it internally.
+ */
+export function resolveMigrationsDir(migrationsDir?: string): string {
   const candidates = [
     migrationsDir,
-    // Running from dist/ (compiled): migrations copied next to the applier.
-    path.join(__dirname, 'migrations'),
-    // Running from source (ts-node/tests): repository source layout.
-    path.join(__dirname, 'migrations'),
+    // Running from dist/ (compiled): SQL copied next to the applier via
+    // nest-cli assets. Running from source (ts-node/tests): the applier
+    // source file lives in the migrations directory itself. In both
+    // layouts the SQL files sit directly in __dirname.
+    __dirname,
+    // Fallback for any other working directory inside the repository.
     path.join(process.cwd(), 'src', 'database', 'migrations'),
   ].filter((c): c is string => typeof c === 'string');
 

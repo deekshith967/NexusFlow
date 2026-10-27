@@ -1,13 +1,21 @@
 /**
  * Applies the database migrations for DATABASE_URL.
  *
- * Usage:
+ * Usage (development, from a checkout):
  *   npm run migrate
  *
+ * Usage (production, from compiled output — no ts-node needed):
+ *   npm run build && npm run migrate:prod
+ *
  * Idempotent: already-applied migrations are skipped (tracked in
- * schema_migrations).
+ * schema_migrations). Honors DATABASE_SSL / sslmode=require for managed
+ * PostgreSQL. Run once per deploy, from a single process: concurrent
+ * migrates are not coordinated.
  */
-import { applyMigrations, checkDatabaseReachable } from '../src/database/migrations/applier';
+import {
+  applyMigrations,
+  checkDatabaseReachable,
+} from './database/migrations/applier';
 
 async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;

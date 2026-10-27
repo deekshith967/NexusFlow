@@ -392,6 +392,72 @@ describe('HTTP API (real PostgreSQL)', () => {
   // Run start and inspection
   // -------------------------------------------------------------------------
 
+  it('isolates versions across tenants (404, no cross-tenant mutation)', async () => {
+    const created = await api(
+      'POST',
+      '/workflows',
+      { name: `x-tenant-${Math.random().toString(36).slice(2, 10)}` },
+      TENANT_A,
+    );
+    expect(created.status).toBe(201);
+    const workflowId = created.body.workflow_id as string;
+
+    const version = await api(
+      'POST',
+      `/workflows/${workflowId}/versions`,
+      { tasks: [task('only')] },
+      TENANT_A,
+    );
+    expect(version.status).toBe(201);
+    const versionId = version.body.workflow_version_id as string;
+
+    // Every version-scoped read and mutation 404s for the other tenant.
+    expect(
+      (await api('GET', `/versions/${versionId}`, undefined, TENANT_B)).status,
+    ).toBe(404);
+    expect(
+      (await api('POST', `/versions/${versionId}/validate`, {}, TENANT_B))
+        .status,
+    ).toBe(404);
+    expect(
+      (await api('POST', `/versions/${versionId}/publish`, {}, TENANT_B))
+        .status,
+    ).toBe(404);
+    expect(
+      (await api('POST', `/versions/${versionId}/retire`, {}, TENANT_B)).status,
+    ).toBe(404);
+    expect(
+      (
+        await api(
+          'PUT',
+          `/versions/${versionId}/definition`,
+          { tasks: [task('only')] },
+          TENANT_B,
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await api(
+          'GET',
+          `/workflows/${workflowId}/versions`,
+          undefined,
+          TENANT_B,
+        )
+      ).status,
+    ).toBe(404);
+
+    // Tenant B's attempts mutated nothing: A can still publish the draft.
+    const published = await api(
+      'POST',
+      `/versions/${versionId}/publish`,
+      {},
+      TENANT_A,
+    );
+    expect(published.status).toBe(200);
+    expect(published.body.state).toBe('PUBLISHED');
+  });
+
   it('starts a run from the published version and supports idempotent replay', async () => {
     const { workflowId } = await createPublishedWorkflow(TENANT_A, [
       task('first'),
