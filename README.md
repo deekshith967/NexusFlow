@@ -25,7 +25,7 @@ NexusFlow does **not** claim exactly-once task execution or exactly-once externa
 - **Worker** (Phase E): consumes dispatches, validates eligibility (state, attempt, fencing token, live lease) before doing anything, transitions to `RUNNING`, renews leases conditionally, executes only **deterministic built-in handlers** (`echo`, `sleep`, `fail`, `merge` — no untrusted code), and reports success/failure through conditional updates that reject stale completions (zero affected rows ⇒ stale, no mutation).
 - **Retry and failure semantics** (Phase E): retryable failures with `maxAttempts`/`retryDelayMs`, `FAIL_WORKFLOW` and `SKIP_DOWNSTREAM` failure policies, `BLOCKED` propagation for downstream of failed tasks, fan-in (all prerequisites) activation, and the exact workflow completion algorithm (B.5) with `workflow.run.succeeded` / `workflow.run.failed` events.
 - **Crash recovery** (contract G): scheduler crash before/after commit (outbox is the source of dispatch truth), worker crash mid-execution (lease expiry + fencing-token rejection of the stale worker), relay crash after publication (idempotent re-marking), Kafka-outage behavior (outbox accumulates; no dispatches lost). All covered by real-PostgreSQL integration tests.
-- **HTTP control plane** (Phase F): create/inspect workflows, draft versions (create/update/validate/publish/retire), start runs (with idempotency), inspect runs/tasks/attempts, health + readiness, tenant via `X-Tenant-Id`, stable status codes (201/200/404/409/422/400), and no raw database diagnostics in responses.
+- **HTTP control plane** (Phase F): create/inspect workflows, draft versions (create/update/validate/publish/retire), start runs (with idempotency), inspect runs/tasks/attempts, health + readiness, API-key authentication with server-side tenant binding (`X-Tenant-Id` optional, must match), stable status codes (201/200/404/409/422/400/401/403), and no raw database diagnostics in responses.
 - **Operations** (Phase G): role-gated single application (`api`, `scheduler`, `worker`, `outbox-relay`, `all`), fail-fast PostgreSQL check at startup, health/readiness endpoints, graceful shutdown (the outbox relay fully drains its in-flight publish cycle before its shutdown hook returns, so it never uses the pool or transport after shutdown; loops/transport/pool are then torn down), idempotent migration applier, and an executable end-to-end demo (`npm run demo`).
 
 ## Technology stack
@@ -122,7 +122,7 @@ Copy `.env.example` to `.env` (or export the variables) and adjust. Key variable
 | `DATABASE_SSL` | auto-detect | `true` \| `false`; when unset, TLS is auto-detected from `sslmode`/`ssl` parameters in `DATABASE_URL`. Required (`true`) for managed PostgreSQL that mandates TLS. |
 | `NEXUSFLOW_API_KEYS` | — (required for `api`/`all`) | Comma-separated `name:secret:tenant-UUID` entries. Each key binds its bearer to one tenant; requests send `Authorization: Bearer <secret>`. Secrets >= 16 chars, unique per key, never committed. |
 | `NEXUSFLOW_ROLE` | `api` | `api` \| `scheduler` \| `worker` \| `outbox-relay` \| `all` |
-| `NEXUSFLOW_TRANSPORT` | `memory` | `kafka` \| `memory` (memory is rejected for the `worker` role) |
+| `NEXUSFLOW_TRANSPORT` | `memory` | `kafka` \| `memory` (memory is rejected for the separate `worker` and `outbox-relay` processes) |
 | `PORT` | `3000` | HTTP port for `api`/`all` roles |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka brokers (kafka transport only) |
 | `KAFKA_SSL` | `false` | `true` \| `false`. Required (`true`) for managed brokers; mandatory when SASL is configured. |
@@ -135,7 +135,17 @@ Copy `.env.example` to `.env` (or export the variables) and adjust. Key variable
 
 ### Single-process local demo (recommended first step)
 
-Requires only PostgreSQL:
+Zero prerequisites beyond Node.js and npm — boots a throwaway
+PostgreSQL, runs the full lifecycle over HTTP, and exits (the first
+run downloads a ~50 MB PostgreSQL binary):
+
+```bash
+npm run demo:local
+```
+
+With your own PostgreSQL instead, start a `role=all` process
+(API + scheduler + worker + relay in one process, in-memory
+transport):
 
 ```bash
 export DATABASE_URL='postgres://user:password@127.0.0.1:5432/nexusflow'
@@ -146,7 +156,7 @@ export NEXUSFLOW_API_KEYS='local:change-me-use-openssl-rand-hex:00000000-0000-00
 npm run start:prod        # or: npm run start:dev
 ```
 
-Or simply run the end-to-end demo, which boots a role=all process, drives the full lifecycle over HTTP, and exits when the run succeeds:
+Or run the same scripted demo against your own database (applies migrations automatically, exits non-zero unless the run succeeds):
 
 ```bash
 export DATABASE_URL='postgres://user:password@127.0.0.1:5432/nexusflow'
@@ -263,6 +273,41 @@ data on the free database.
 > step for the Render path (and for Kafka-backed multi-process
 > operation in general — see [Limitations](#limitations)).
 
+### Zero-cost demo options
+
+Ways to run the engine for $0, most reliable first:
+
+1. **`npm run demo:local` (verified, recommended).** $0 forever,
+   zero prerequisites beyond Node.js: throwaway PostgreSQL plus
+   the complete engine in one process (`role=all` runs the API,
+   scheduler, worker, and relay). Limitations: single-process only
+   (in-memory transport, no cross-process delivery), ephemeral
+   database, fixed local-only demo secret.
+2. **Local Docker, one container per role ($0, your machine).**
+   Full production shape (separate api/scheduler/worker/relay plus
+   local PostgreSQL and local Kafka) with no hosting bill — but the
+   `Dockerfile` is reviewed, unexecuted infrastructure (no Docker
+   daemon here), and you must provide the Kafka broker yourself.
+3. **Hosted single-process demo (researched, NOT verified): $0.**
+   One Render Free web service running `role=all`, plus a free
+   Neon Postgres (no expiry, scales to zero) and a free Upstash
+   Kafka tier (SASL_SSL, supported by the client). Hard
+   limitations: the free web service **sleeps after 15 minutes
+   idle and all in-process loops stop with it**; Render Free does
+   not support **`preDeployCommand`**, so migrations must run at
+   container startup (safe only with a single instance — never
+   copy that pattern to multi-instance services); Neon
+   scale-to-zero adds wake latency and requires TLS (supported);
+   free Kafka quotas must be re-verified against current vendor
+   limits. Demo-grade availability only.
+
+There is **no suitable free hosted full multi-process
+deployment**: Render has no free tier for background workers, so
+the scheduler/worker/relay cannot each run as a separate
+always-on service for $0. `render.yaml` stays the honest
+production blueprint (paid worker plans) and is unchanged by
+these demo options.
+
 ## HTTP API
 
 Every workflow/version/run endpoint requires `Authorization: Bearer <api-key-secret>` (see `NEXUSFLOW_API_KEYS`). Identity is the key's tenant, bound server-side: the `X-Tenant-Id` header (UUID) is optional and, when present, must match the authenticated tenant. Missing/invalid credentials → 401, mismatched tenant header → 403, malformed header → 422. `/health` and `/health/ready` stay public for platform health checks.
@@ -346,6 +391,8 @@ npm run lint
 npm run build
 ```
 
+CI (`.github/workflows/main.yml`) runs the full suite, lint, typecheck, and build on every push/PR to `master`, plus a `demo` job that builds, runs the compiled migrations, and executes `npm run demo` against a PostgreSQL service.
+
 Suite overview (at the current HEAD):
 
 | Suite | Type | What it proves |
@@ -371,7 +418,7 @@ Integration tests start a real, throwaway PostgreSQL server (via the `embedded-p
 
 ## Executable end-to-end demo
 
-`npm run demo` (requires `DATABASE_URL`) runs the complete vertical slice against real PostgreSQL in one process and prints the persisted results — see [Running](#running) for the exact command. It exits non-zero if the run does not succeed.
+`npm run demo:local` runs the complete vertical slice with zero prerequisites: it boots a throwaway (ephemeral) PostgreSQL, applies migrations, drives workflow → draft → publish → run → execution over authenticated HTTP in one `role=all` process, prints the persisted results, and exits non-zero unless the run succeeds. `npm run demo` runs the same script against your own database (`DATABASE_URL` required) — see [Running](#running). The demo uses a fixed local-only API secret; never reuse it anywhere else.
 
 ## Limitations
 

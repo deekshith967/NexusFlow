@@ -18,6 +18,7 @@
     "test:cov": "jest --coverage",
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "demo": "ts-node --files scripts/e2e-demo.ts",
+    "demo:local": "node scripts/demo-local.mjs",
     "migrate": "ts-node --files src/migrate.ts",
     "migrate:prod": "node dist/migrate.js"
   },
