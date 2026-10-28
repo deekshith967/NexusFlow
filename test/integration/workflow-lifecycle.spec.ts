@@ -8,6 +8,8 @@ import { Pool } from 'pg';
 
 import {
   WorkflowNameConflictError,
+  WorkflowNotFoundError,
+  WorkflowVersionNotFoundError,
 } from '../../src/common/errors';
 import {
   InvalidWorkflowVersionTransitionError,
@@ -146,7 +148,7 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
       expect(version.state).toBe('DRAFT');
       expect(version.version_number).toBe(1);
 
-      const loaded = await service.getVersion(version.workflow_version_id);
+      const loaded = await service.getVersion(tenantId, version.workflow_version_id);
       expect(loaded.tasks).toHaveLength(3);
       expect(loaded.dependencies).toHaveLength(2);
     });
@@ -242,7 +244,7 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
       );
 
       await expect(
-        service.publish(version.workflow_version_id),
+        service.publish(tenantId, version.workflow_version_id),
       ).rejects.toThrow(WorkflowValidationError);
 
       // The version must still be DRAFT (publication rolled back).
@@ -267,7 +269,7 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
         [v2.workflow_version_id],
       );
       await expect(
-        service.publish(v2.workflow_version_id),
+        service.publish(tenantId, v2.workflow_version_id),
       ).rejects.toThrow(WorkflowValidationError);
 
       // IGNORE_FAILURE is not a valid Phase 1 policy: the database
@@ -300,7 +302,7 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
         definition: definition([task('a'), task('b', { dependencies: ['a'] })]),
       });
 
-      const published = await service.publish(version.workflow_version_id);
+      const published = await service.publish(tenantId, version.workflow_version_id);
 
       expect(published.state).toBe('PUBLISHED');
       expect(published.published_at).not.toBeNull();
@@ -323,10 +325,10 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
         workflowId: workflow.workflow_id,
         definition: definition([task('a')]),
       });
-      await service.publish(version.workflow_version_id);
+      await service.publish(tenantId, version.workflow_version_id);
 
       await expect(
-        service.publish(version.workflow_version_id),
+        service.publish(tenantId, version.workflow_version_id),
       ).rejects.toThrow(InvalidWorkflowVersionTransitionError);
     });
 
@@ -339,17 +341,18 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
         workflowId: workflow.workflow_id,
         definition: definition([task('a'), task('b', { dependencies: ['a'] })]),
       });
-      await service.publish(version.workflow_version_id);
+      await service.publish(tenantId, version.workflow_version_id);
 
       await expect(
         service.updateDraftDefinition({
+          tenantId,
           workflowVersionId: version.workflow_version_id,
           definition: definition([task('only-a')]),
         }),
       ).rejects.toBeInstanceOf(PublishedWorkflowVersionImmutableError);
 
       // The stored graph must be unchanged.
-      const loaded = await service.getVersion(version.workflow_version_id);
+      const loaded = await service.getVersion(tenantId, version.workflow_version_id);
       expect(loaded.tasks).toHaveLength(2);
       expect(loaded.dependencies).toHaveLength(1);
     });
@@ -364,8 +367,8 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
         workflowId: workflow.workflow_id,
         definition: definition([task('a')]),
       });
-      await service.publish(version.workflow_version_id);
-      await service.retire(version.workflow_version_id);
+      await service.publish(tenantId, version.workflow_version_id);
+      await service.retire(tenantId, version.workflow_version_id);
 
       await expect(
         runs.startRun({
@@ -384,6 +387,45 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
       ).rejects.toBeInstanceOf(RunLaunchRejectedError);
     });
 
+    it('rejects version operations from another tenant (service-level isolation)', async () => {
+      const workflow = await newWorkflow('cross-tenant');
+      const service = createWorkflowService(pool);
+      const otherTenant = '22222222-2222-4222-8222-222222222222';
+
+      const version = await service.createDraftVersion({
+        tenantId,
+        workflowId: workflow.workflow_id,
+        definition: definition([task('a')]),
+      });
+
+      await expect(
+        service.getVersion(otherTenant, version.workflow_version_id),
+      ).rejects.toBeInstanceOf(WorkflowVersionNotFoundError);
+      await expect(
+        service.publish(otherTenant, version.workflow_version_id),
+      ).rejects.toBeInstanceOf(WorkflowVersionNotFoundError);
+      await expect(
+        service.retire(otherTenant, version.workflow_version_id),
+      ).rejects.toBeInstanceOf(WorkflowVersionNotFoundError);
+      await expect(
+        service.updateDraftDefinition({
+          tenantId: otherTenant,
+          workflowVersionId: version.workflow_version_id,
+          definition: definition([task('b')]),
+        }),
+      ).rejects.toBeInstanceOf(WorkflowVersionNotFoundError);
+      await expect(
+        service.listVersions(otherTenant, workflow.workflow_id),
+      ).rejects.toBeInstanceOf(WorkflowNotFoundError);
+
+      // Owner access is unaffected: the version is still a draft.
+      const loaded = await service.getVersion(
+        tenantId,
+        version.workflow_version_id,
+      );
+      expect(loaded.version.state).toBe('DRAFT');
+    });
+
     it('discarded drafts cannot be published (B.1)', async () => {
       const workflow = await newWorkflow('discard');
       const service = createWorkflowService(pool);
@@ -393,10 +435,10 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
         workflowId: workflow.workflow_id,
         definition: definition([task('a')]),
       });
-      await service.discard(version.workflow_version_id);
+      await service.discard(tenantId, version.workflow_version_id);
 
       await expect(
-        service.publish(version.workflow_version_id),
+        service.publish(tenantId, version.workflow_version_id),
       ).rejects.toThrow(InvalidWorkflowVersionTransitionError);
     });
   });
@@ -420,7 +462,7 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
             : [task('a'), task('b', { dependencies: ['a'] }), task('c', { dependencies: ['b'] })],
         ),
       });
-      await service.publish(version.workflow_version_id);
+      await service.publish(tenantId, version.workflow_version_id);
 
       return { workflow, version };
     }

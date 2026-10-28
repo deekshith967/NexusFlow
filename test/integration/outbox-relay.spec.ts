@@ -216,7 +216,7 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
     // Fault injection: the transport refuses publication.
     engine.transport.outage = true;
 
-    await engine.workflows.publish(version.workflow_version_id);
+    await engine.workflows.publish(tenantId, version.workflow_version_id);
 
     const before = await unpublishedEvents();
     expect(before.some((e) => e.event_type === 'workflow.version.published')).toBe(true);
@@ -274,7 +274,7 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
       workflowId: workflow.workflow_id,
       definition: { name: 'crash-wf', tasks: [task('y')] },
     });
-    await engine.workflows.publish(version.workflow_version_id);
+    await engine.workflows.publish(tenantId, version.workflow_version_id);
 
     const eventRow = (
       await pool.query<{
@@ -364,7 +364,7 @@ describe('outbox relay (real PostgreSQL + in-memory transport)', () => {
       workflowId: workflow.workflow_id,
       definition: { name: 'conc-wf', tasks: [task('z')] },
     });
-    await engine.workflows.publish(version.workflow_version_id);
+    await engine.workflows.publish(tenantId, version.workflow_version_id);
 
     const [relayA, relayB] = [
       new OutboxRelayService(new DatabaseService(pool), baseConfig(), engine.transport),

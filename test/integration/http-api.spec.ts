@@ -22,6 +22,11 @@ import { startTestDb, TestDb } from '../helpers/test-db';
 const TENANT_A = 'aaaa1111-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const TENANT_B = 'bbbb2222-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
+// Test-only API secrets (>= 16 chars). Key A binds TENANT_A, key B binds
+// TENANT_B; the api() helper derives the matching key per tenant.
+const SECRET_A = 'test-secret-for-tenant-a1';
+const SECRET_B = 'test-secret-for-tenant-b1';
+
 interface TaskBody {
   taskKey: string;
   handlerType: string;
@@ -65,6 +70,7 @@ describe('HTTP API (real PostgreSQL)', () => {
       'NEXUSFLOW_ROLE',
       'NEXUSFLOW_TRANSPORT',
       'NEXUSFLOW_DEFAULT_TENANT_ID',
+      'NEXUSFLOW_API_KEYS',
     ]) {
       previousEnv[key] = process.env[key];
     }
@@ -73,6 +79,8 @@ describe('HTTP API (real PostgreSQL)', () => {
     process.env.NEXUSFLOW_ROLE = 'api';
     process.env.NEXUSFLOW_TRANSPORT = 'memory';
     process.env.NEXUSFLOW_DEFAULT_TENANT_ID = TENANT_A;
+    process.env.NEXUSFLOW_API_KEYS =
+      `key-a:${SECRET_A}:${TENANT_A},key-b:${SECRET_B}:${TENANT_B}`;
 
     app = await NestFactory.create(AppModule);
     app.useGlobalFilters(new ApiExceptionsFilter());
@@ -115,12 +123,28 @@ describe('HTTP API (real PostgreSQL)', () => {
     path: string,
     body?: unknown,
     tenant?: string,
+    // Secret to present as `Authorization: Bearer`. Defaults to the key
+    // bound to `tenant` (TENANT_B -> SECRET_B, anything else -> SECRET_A);
+    // pass null to omit credentials (401 tests) or an explicit secret to
+    // simulate another caller (mismatch/isolation tests).
+    secret?: string | null,
   ): Promise<ApiResult> {
+    let resolvedSecret: string | null;
+
+    if (secret === undefined) {
+      resolvedSecret = tenant === TENANT_B ? SECRET_B : SECRET_A;
+    } else {
+      resolvedSecret = secret;
+    }
+
     const response = await fetch(`${baseUrl}${path}`, {
       method,
       headers: {
         'content-type': 'application/json',
         ...(tenant ? { 'x-tenant-id': tenant } : {}),
+        ...(resolvedSecret
+          ? { authorization: `Bearer ${resolvedSecret}` }
+          : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -392,6 +416,72 @@ describe('HTTP API (real PostgreSQL)', () => {
   // Run start and inspection
   // -------------------------------------------------------------------------
 
+  it('isolates versions across tenants (404, no cross-tenant mutation)', async () => {
+    const created = await api(
+      'POST',
+      '/workflows',
+      { name: `x-tenant-${Math.random().toString(36).slice(2, 10)}` },
+      TENANT_A,
+    );
+    expect(created.status).toBe(201);
+    const workflowId = created.body.workflow_id as string;
+
+    const version = await api(
+      'POST',
+      `/workflows/${workflowId}/versions`,
+      { tasks: [task('only')] },
+      TENANT_A,
+    );
+    expect(version.status).toBe(201);
+    const versionId = version.body.workflow_version_id as string;
+
+    // Every version-scoped read and mutation 404s for the other tenant.
+    expect(
+      (await api('GET', `/versions/${versionId}`, undefined, TENANT_B)).status,
+    ).toBe(404);
+    expect(
+      (await api('POST', `/versions/${versionId}/validate`, {}, TENANT_B))
+        .status,
+    ).toBe(404);
+    expect(
+      (await api('POST', `/versions/${versionId}/publish`, {}, TENANT_B))
+        .status,
+    ).toBe(404);
+    expect(
+      (await api('POST', `/versions/${versionId}/retire`, {}, TENANT_B)).status,
+    ).toBe(404);
+    expect(
+      (
+        await api(
+          'PUT',
+          `/versions/${versionId}/definition`,
+          { tasks: [task('only')] },
+          TENANT_B,
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await api(
+          'GET',
+          `/workflows/${workflowId}/versions`,
+          undefined,
+          TENANT_B,
+        )
+      ).status,
+    ).toBe(404);
+
+    // Tenant B's attempts mutated nothing: A can still publish the draft.
+    const published = await api(
+      'POST',
+      `/versions/${versionId}/publish`,
+      {},
+      TENANT_A,
+    );
+    expect(published.status).toBe(200);
+    expect(published.body.state).toBe('PUBLISHED');
+  });
+
   it('starts a run from the published version and supports idempotent replay', async () => {
     const { workflowId } = await createPublishedWorkflow(TENANT_A, [
       task('first'),
@@ -518,5 +608,88 @@ describe('HTTP API (real PostgreSQL)', () => {
 
     const badLimit = await api('GET', '/runs?limit=abc', undefined, TENANT_A);
     expect(badLimit.status).toBe(400);
+  });
+
+  // -------------------------------------------------------------------------
+  // API-key authentication and server-side tenant binding
+  // -------------------------------------------------------------------------
+
+  it('rejects unauthenticated and wrongly authenticated requests with 401', async () => {
+    const missing = await api('GET', '/workflows', undefined, TENANT_A, null);
+    expect(missing.status).toBe(401);
+    expect(missing.body.statusCode).toBe(401);
+    expect(missing.body.error).toBe('UnauthorizedException');
+    expect(typeof missing.body.message).toBe('string');
+
+    const wrongSecret = await api(
+      'GET',
+      '/workflows',
+      undefined,
+      TENANT_A,
+      'wrong-secret-value-0000',
+    );
+    expect(wrongSecret.status).toBe(401);
+    expect(wrongSecret.body.error).toBe('UnauthorizedException');
+
+    // Health stays public: platform health checks carry no credentials.
+    const readiness = await api(
+      'GET',
+      '/health/ready',
+      undefined,
+      undefined,
+      null,
+    );
+    expect(readiness.status).toBe(200);
+    expect(readiness.body.status).toBe('ready');
+  });
+
+  it('binds the tenant from the API key and rejects mismatched headers with 403', async () => {
+    // Key A authenticates tenant A; claiming tenant B via the header is
+    // forbidden — the header is never trusted as identity.
+    const mismatch = await api(
+      'POST',
+      '/workflows',
+      { name: 'mismatch-probe' },
+      TENANT_B,
+      SECRET_A,
+    );
+    expect(mismatch.status).toBe(403);
+    expect(mismatch.body.error).toBe('ForbiddenException');
+
+    // Without any tenant header, identity comes from the key alone.
+    const name = `keybound-${Math.random().toString(36).slice(2, 10)}`;
+    const created = await api(
+      'POST',
+      '/workflows',
+      { name },
+      undefined,
+      SECRET_A,
+    );
+    expect(created.status).toBe(201);
+    const workflowId = created.body.workflow_id as string;
+
+    // Tenant B's key cannot see tenant A's workflow (key-bound isolation).
+    const listedB = await api(
+      'GET',
+      '/workflows',
+      undefined,
+      undefined,
+      SECRET_B,
+    );
+    expect(listedB.status).toBe(200);
+    expect(
+      (listedB.body as unknown as unknown[]).some(
+        (row) => (row as { workflow_id: string }).workflow_id === workflowId,
+      ),
+    ).toBe(false);
+
+    const fetchedB = await api(
+      'GET',
+      `/workflows/${workflowId}`,
+      undefined,
+      undefined,
+      SECRET_B,
+    );
+    expect(fetchedB.status).toBe(404);
   });
 });

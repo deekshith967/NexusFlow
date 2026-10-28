@@ -13,6 +13,9 @@ describe('AppModule', () => {
       'postgres://nexusflow:nexusflow@127.0.0.1:5432/nexusflow';
     process.env.NEXUSFLOW_ROLE = 'api';
     process.env.NEXUSFLOW_TRANSPORT = 'memory';
+    // The api role requires at least one API key (throwaway test value).
+    process.env.NEXUSFLOW_API_KEYS =
+      'test:test-secret-for-app-module-0:00000000-0000-0000-0000-000000000000';
   });
 
   afterAll(() => {
@@ -23,6 +26,7 @@ describe('AppModule', () => {
     }
     delete process.env.NEXUSFLOW_ROLE;
     delete process.env.NEXUSFLOW_TRANSPORT;
+    delete process.env.NEXUSFLOW_API_KEYS;
   });
 
   it('compiles the root application module and shuts down the database pool', async () => {

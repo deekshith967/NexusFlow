@@ -31,7 +31,7 @@ NexusFlow does **not** claim exactly-once task execution or exactly-once externa
 ## Technology stack
 
 - TypeScript (strict, `commonjs`)
-- Node.js / npm (Node 18+; the demo uses the built-in `fetch`)
+- Node.js / npm (pinned to Node 22.22.0 via `.node-version`, `package.json` `engines`, and the `Dockerfile`; the demo uses the built-in `fetch`)
 - NestJS 11
 - PostgreSQL (`pg`) — authoritative state; migrations applied via an idempotent, tracked applier (`schema_migrations`)
 - Kafka (`kafkajs`) — production transport for dispatch + lifecycle events (idempotent producer, consumer group, topic bootstrap)
@@ -44,13 +44,17 @@ NexusFlow does **not** claim exactly-once task execution or exactly-once externa
 ```text
 .
 ├── AGENTS.md
-├── docs/architecture/final-architecture-contract.md
+├── Dockerfile                # multi-stage production image (all roles)
+├── render.yaml               # Render blueprint: managed PG + one service per role
+├── docs/
+│   ├── architecture/final-architecture-contract.md
+│   └── adr/                  # architecture decision records
 ├── scripts/
-│   ├── migrate.ts            # apply migrations (npm run migrate)
 │   └── e2e-demo.ts           # executable end-to-end demo (npm run demo)
 ├── src/
 │   ├── app.module.ts         # role-gated single application
 │   ├── main.ts               # bootstrap: DB check, HTTP for api/all roles
+│   ├── migrate.ts            # migration CLI (npm run migrate / migrate:prod)
 │   ├── config/               # env parsing + validation (loadEnvConfig)
 │   ├── database/             # Pool provider, DatabaseService, migrations + applier
 │   ├── outbox/               # outbox event types, repository, relay module/service
@@ -72,7 +76,7 @@ NexusFlow does **not** claim exactly-once task execution or exactly-once externa
 
 ## Prerequisites
 
-- Node.js 18+ and npm
+- Node.js 22.22.x and npm (exact pin in `.node-version`; `engines` requires `>=22.22.0 <23.0.0`)
 - A reachable **PostgreSQL** database (any version the `pg` driver supports; the test suite proves PostgreSQL 18)
 - **Kafka** — only when running `NEXUSFLOW_TRANSPORT=kafka` (i.e., any multi-process deployment). Not needed for tests or the single-process demo.
 
@@ -92,10 +96,21 @@ Migrations are idempotent and tracked in `schema_migrations`:
 
 ```bash
 export DATABASE_URL='postgres://user:password@127.0.0.1:5432/nexusflow'
-npm run migrate
+npm run migrate          # development: runs the TypeScript source via ts-node
 ```
 
-`npm run demo` also applies migrations automatically.
+From compiled output (production, no dev dependencies needed — the
+migration SQL is packaged into `dist/` by the build):
+
+```bash
+npm run build
+npm run migrate:prod     # runs node dist/migrate.js
+```
+
+Run migrations once per deploy, from a single process: concurrent
+migrates are not coordinated. The migrator honors `DATABASE_SSL` /
+`sslmode=require`, so it works against managed PostgreSQL that
+requires TLS. `npm run demo` also applies migrations automatically.
 
 ## Configuration
 
@@ -104,11 +119,15 @@ Copy `.env.example` to `.env` (or export the variables) and adjust. Key variable
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DATABASE_URL` | — (required) | PostgreSQL connection string |
+| `DATABASE_SSL` | auto-detect | `true` \| `false`; when unset, TLS is auto-detected from `sslmode`/`ssl` parameters in `DATABASE_URL`. Required (`true`) for managed PostgreSQL that mandates TLS. |
+| `NEXUSFLOW_API_KEYS` | — (required for `api`/`all`) | Comma-separated `name:secret:tenant-UUID` entries. Each key binds its bearer to one tenant; requests send `Authorization: Bearer <secret>`. Secrets >= 16 chars, unique per key, never committed. |
 | `NEXUSFLOW_ROLE` | `api` | `api` \| `scheduler` \| `worker` \| `outbox-relay` \| `all` |
 | `NEXUSFLOW_TRANSPORT` | `memory` | `kafka` \| `memory` (memory is rejected for the `worker` role) |
 | `PORT` | `3000` | HTTP port for `api`/`all` roles |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka brokers (kafka transport only) |
-| `NEXUSFLOW_DEFAULT_TENANT_ID` | `00000000-0000-0000-0000-000000000000` | Tenant when `X-Tenant-Id` is absent (must be a UUID) |
+| `KAFKA_SSL` | `false` | `true` \| `false`. Required (`true`) for managed brokers; mandatory when SASL is configured. |
+| `KAFKA_SASL_MECHANISM` / `_USERNAME` / `_PASSWORD` | — (unset) | Broker auth: `plain` (Confluent Cloud) or `scram-sha-256` / `scram-sha-512` (Upstash, Redpanda) + credentials. All three set together, with `KAFKA_SSL=true`; partial or plaintext-SASL config is a boot error. |
+| `NEXUSFLOW_DEFAULT_TENANT_ID` | `00000000-0000-0000-0000-000000000000` | Informational default echoed in `/health/ready` (must be a UUID). API identity comes from `NEXUSFLOW_API_KEYS`; the key's tenant always wins. |
 | `SCHEDULER_POLL_MS` / `SCHEDULER_BATCH_LIMIT` / `NEXUSFLOW_LEASE_MS` | `250` / `20` / `30000` | Scheduler tuning |
 | `RELAY_POLL_MS` / `RELAY_BATCH_LIMIT` / `RELAY_CLAIM_TTL_MS` / `RELAY_PUBLISH_TIMEOUT_MS` | `250` / `20` / `30000` / `30000` | Outbox relay tuning (publish timeout bounds each broker call and the shutdown drain) |
 
@@ -122,6 +141,8 @@ Requires only PostgreSQL:
 export DATABASE_URL='postgres://user:password@127.0.0.1:5432/nexusflow'
 export NEXUSFLOW_ROLE=all
 export NEXUSFLOW_TRANSPORT=memory
+# Required: at least one key (generate real secrets with: openssl rand -hex 24).
+export NEXUSFLOW_API_KEYS='local:change-me-use-openssl-rand-hex:00000000-0000-0000-0000-000000000000'
 npm run start:prod        # or: npm run start:dev
 ```
 
@@ -142,6 +163,13 @@ Requires PostgreSQL **and** Kafka:
 export DATABASE_URL='postgres://user:password@host:5432/nexusflow'
 export NEXUSFLOW_TRANSPORT=kafka
 export KAFKA_BOOTSTRAP_SERVERS='host1:9092,host2:9092'
+# Required for the api role (parsed everywhere, enforced for api/all):
+export NEXUSFLOW_API_KEYS='<name>:<secret>=16 chars:<tenant-UUID>[,...]'
+# Managed brokers (all require SASL_SSL):
+export KAFKA_SSL=true
+export KAFKA_SASL_MECHANISM=scram-sha-256   # or plain for Confluent Cloud
+export KAFKA_SASL_USERNAME='<broker-username>'
+export KAFKA_SASL_PASSWORD='<broker-password>'
 
 # Terminal 1 — API
 NEXUSFLOW_ROLE=api node dist/main.js
@@ -155,9 +183,89 @@ NEXUSFLOW_ROLE=outbox-relay node dist/main.js
 
 Run `npm run build` first. All roles share the same codebase; roles are selected at bootstrap.
 
+## Deploying
+
+### Docker
+
+The multi-stage `Dockerfile` builds a production image (compiled `dist/`
+plus production-only dependencies; no `ts-node`, no dev dependencies).
+The same image serves every role:
+
+```bash
+docker build -t nexusflow .
+docker run --rm -e DATABASE_URL='...' nexusflow node dist/migrate.js
+docker run -d -p 3000:3000 -e DATABASE_URL='...' -e NEXUSFLOW_ROLE=api nexusflow
+# ... one container per role (api, scheduler, worker, outbox-relay),
+# all with NEXUSFLOW_TRANSPORT=kafka and KAFKA_BOOTSTRAP_SERVERS set.
+```
+
+> Note: the `Dockerfile` is provided as reviewed, unexecuted
+> infrastructure — no Docker daemon is available in this environment, so
+> `docker build` has not been run here. Validate it in CI before
+> depending on it.
+
+### Render
+
+`render.yaml` is a Render Blueprint provisioning managed PostgreSQL plus
+one service per NexusFlow role (web `api` with `GET /health/ready` as
+the health check; background workers for `scheduler`, `worker`, and
+`outbox-relay`). Notes:
+
+- Set `KAFKA_BOOTSTRAP_SERVERS` in the dashboard to an **external**
+  broker (Render has no managed Kafka). Multi-process deployments
+  require Kafka; the `worker` and `outbox-relay` roles refuse to boot
+  with `NEXUSFLOW_TRANSPORT=memory`.
+- Set `NEXUSFLOW_API_KEYS` (dashboard-prompted,
+  `name:secret:tenant-UUID` entries) on the `api` service — it refuses
+  to boot without keys. Health checks need no credentials
+  (`/health/ready` is public).
+- Set the `KAFKA_SASL_MECHANISM` / `_USERNAME` / `_PASSWORD` trio
+  (dashboard-prompted) on `worker` and `relay`: `plain` for Confluent
+  Cloud, `scram-sha-256` (or `-512`) for Upstash/Redpanda.
+  `KAFKA_SSL=true` is already set — SASL requires TLS.
+- Migrations run once per deploy via the `api` service's
+  `preDeployCommand` (`npm run migrate:prod`). Do not add it to the
+  other services — concurrent migrates are not coordinated.
+- Plans: only the `api` web service and the database use the Free
+  plan. Background workers have no free tier, so `scheduler`,
+  `worker`, and `relay` use `0.5c-512mb` (the cheapest valid worker
+  plan). The free web service sleeps after 15 minutes without traffic
+  (~1 minute to wake); use a paid plan for an always-on API.
+- TLS: `DATABASE_SSL` is deliberately **not** set. The blueprint
+  injects Render's **internal** database URL, which uses the private
+  network where TLS is optional — forcing TLS would crash every
+  service at boot when the server does not offer it (the `pg` client
+  fails closed instead of falling back to plaintext). TLS remains
+  available for external or TLS-mandating endpoints via
+  `DATABASE_SSL=true` or `?sslmode=require`.
+- Shutdown grace: `relay` gets `maxShutdownDelaySeconds: 120` so its
+  bounded in-flight drain (at most one `RELAY_PUBLISH_TIMEOUT_MS`
+  publish plus overhead) completes instead of relying on claim-expiry
+  recovery; `worker` gets `60` as headroom for consumer disconnect
+  and in-flight completion writes (in-flight handlers are not
+  awaited — lease expiry reclaims them either way). The API and
+  scheduler keep the 30s default.
+
+Free PostgreSQL limits (per [Render's docs](https://render.com/docs/free)):
+only one free database per workspace, fixed 1 GB storage, **expiry 30
+days after creation** (an expired database is inaccessible unless
+upgraded), a 14-day grace period to upgrade before Render **deletes**
+it with all its data, no backups, no managed connection pooling, and
+possible maintenance/restarts at any time. Upgrade path: upgrade the
+database to any paid compute plan from the Render Dashboard **before
+the grace period ends** — the data stays in place. (Changing a
+database's compute plan needs brief downtime.) Do not run production
+data on the free database.
+
+> Note: the blueprint has been syntax/structure-validated but not
+> applied to a Render account from here — no credentials or live
+> service are claimed. The first real deploy remains the verification
+> step for the Render path (and for Kafka-backed multi-process
+> operation in general — see [Limitations](#limitations)).
+
 ## HTTP API
 
-Tenants are selected with the `X-Tenant-Id` header (UUID), defaulting to `NEXUSFLOW_DEFAULT_TENANT_ID`.
+Every workflow/version/run endpoint requires `Authorization: Bearer <api-key-secret>` (see `NEXUSFLOW_API_KEYS`). Identity is the key's tenant, bound server-side: the `X-Tenant-Id` header (UUID) is optional and, when present, must match the authenticated tenant. Missing/invalid credentials → 401, mismatched tenant header → 403, malformed header → 422. `/health` and `/health/ready` stay public for platform health checks.
 
 | Method & path | Purpose | Success | Errors |
 | --- | --- | --- | --- |
@@ -177,7 +285,7 @@ Tenants are selected with the `X-Tenant-Id` header (UUID), defaulting to `NEXUSF
 | `GET /runs/:workflowRunId/tasks` | Task executions | 200 | 404 |
 | `GET /runs/:workflowRunId/tasks/:taskExecutionId/attempts` | Attempt history | 200 | 404 |
 | `GET /health` | Liveness | 200 | — |
-| `GET /health/ready` | Readiness (checks PostgreSQL) | 200 `ready`/`not_ready` | — |
+| `GET /health/ready` | Readiness (checks PostgreSQL) | 200 `ready` / 503 `not_ready` (database down) | — |
 
 Task body shape:
 
@@ -205,7 +313,8 @@ Error responses are stable envelopes `{ statusCode, error, message }`; raw datab
 ```bash
 export BASE=http://127.0.0.1:3000
 export TENANT=$NEXUSFLOW_DEFAULT_TENANT_ID
-H='-H content-type:application/json -H x-tenant-id:'"$TENANT"
+export APIKEY='<one secret from NEXUSFLOW_API_KEYS>'
+H='-H content-type:application/json -H x-tenant-id:'"$TENANT"' -H authorization:Bearer '"$APIKEY"
 
 curl -sS $H -d '{"name":"orders"}' $BASE/workflows
 # -> {"workflow_id":"...","name":"orders","status":"active",...}
@@ -242,7 +351,14 @@ Suite overview (at the current HEAD):
 | Suite | Type | What it proves |
 | --- | --- | --- |
 | `test/workflow/workflow-domain.spec.ts` | unit | DAG validation, version state machine, failure policies |
-| `test/unit/kafka-transport.spec.ts` | unit (mocked `kafkajs`) | client/producer/consumer wiring, topic bootstrap + already-exists tolerance, message mapping, crash reconnect, shutdown |
+| `test/unit/env.spec.ts` | unit | env parsing/validation: defaults, DATABASE_URL, role/transport, memory guard for worker + outbox-relay, tenant UUID, tuning ints, DATABASE_SSL explicit/auto-detect/override, Render internal-URL shape, pool/check consistency, API keys, Kafka security |
+| `test/unit/api-key-auth.spec.ts` | unit | constant-time key lookup, Bearer guard (missing/malformed/valid), server-side tenant binding (match/403 mismatch/422 malformed/fail-closed) |
+| `test/unit/health.controller.spec.ts` | unit | liveness plus the readiness status contract: 200 `ready` vs 503 `not_ready` when PostgreSQL is down (no database needed) |
+| `test/unit/kafka-transport.spec.ts` | unit (mocked `kafkajs`) | client/producer/consumer wiring, topic bootstrap + already-exists tolerance, message mapping, crash reconnect, shutdown, TLS/SASL wiring, connect/send failure propagation |
+| `test/database/database.module.spec.ts` | unit | pool error handler never leaks driver diagnostics to logs |
+| `test/database/database.service.spec.ts` | unit (mocked `pg` pool) | query delegation, transaction commit/rollback/release paths, pool shutdown |
+| `test/database/migrations-applier.spec.ts` | unit (mocked `pg`) | migration-directory resolution; TLS-aware reachability check (explicit DATABASE_SSL, sslmode auto-detect, plain local, override parity with the app pool) |
+| `test/database/pg-tls-behavior.spec.ts` | **real PostgreSQL** | pins the `pg` no-plaintext-fallback behavior that forbids forcing TLS on Render's internal URL; boot check fails closed when `DATABASE_SSL=true` against a non-TLS server |
 | `test/app.module.spec.ts` | unit | module compilation, pool shutdown |
 | `test/integration/workflow-lifecycle.spec.ts` | **real PostgreSQL** | identity uniqueness incl. concurrent conflicts, draft creation, invalid-DAG rejection, publication atomicity + events, immutability, idempotent run start, task initialization |
 | `test/integration/scheduler-claim.spec.ts` | **real PostgreSQL** | claim selection (READY/due RETRY_WAIT/expired lease), atomicity, fencing increment, concurrency (two schedulers, no double claim) |
@@ -261,12 +377,12 @@ Integration tests start a real, throwaway PostgreSQL server (via the `embedded-p
 
 Honest boundaries of what is verified:
 
-- **No real Kafka broker has been exercised.** The Kafka transport is implemented and unit-tested with a mocked `kafkajs` client, but no broker is available in this environment, so dispatch over a real Kafka cluster, consumer-group rebalancing, and broker outages are **unverified**. The integration/E2E suites run on the in-memory transport, which is a same-process double of the transport interface — it validates the outbox/relay/scheduler/worker behavior, not Kafka.
+- **No real Kafka broker has been exercised.** The Kafka transport is implemented and unit-tested with a mocked `kafkajs` client, but no broker is available in this environment, so dispatch over a real Kafka cluster, consumer-group rebalancing, broker outages, and the SASL_SSL handshake are **unverified** (TLS/SASL wiring is configured and unit-tested, including failure propagation, but no live broker has authenticated this client yet). The integration/E2E suites run on the in-memory transport, which is a same-process double of the transport interface — it validates the outbox/relay/scheduler/worker behavior, not Kafka.
 - **No real multi-process deployment tested** (requires Kafka). Concurrency is instead proven by concurrent in-process schedulers/workers against real PostgreSQL row locking.
 - **Single-tenant isolation is by column + query**, not by Postgres row-level security.
 - **`IGNORE_FAILURE` failure policy is not implemented** (deferred by the contract; the API rejects it).
 - **No cancellation API** (schema supports `cancellation_requested_at`; the endpoint is not part of this MVP).
-- **No authentication/authorization** beyond the tenant header; not suitable for untrusted networks as-is.
+- **API-key authentication only**: no OIDC/JWT, no per-key scopes or expiry, no rate limiting; keys rotate via redeploy. Suitable for trusted/small-tenant use; reassess before broad multi-tenant exposure.
 - **No Redis** (reserved by the contract; not used anywhere).
 - Handlers are deterministic built-ins only; there is no plugin/untrusted-code execution path.
 - Exactly-once execution is **not** claimed: at-least-once delivery with idempotent, conditionally-guarded state transitions.
@@ -289,7 +405,7 @@ Consult `AGENTS.md` before asking coding agents to make changes.
 1. Verify the Kafka transport against a real broker (dispatch, consumer groups, broker outage) and run a multi-process deployment.
 2. Cancellation API and cooperative task cancellation.
 3. `IGNORE_FAILURE` failure policy (per contract deferral).
-4. Observability (structured metrics/traces), per-tenant rate limiting, and authn/z.
+4. Observability (structured metrics/traces), per-tenant rate limiting, and stronger authn/z (OIDC/JWT, key scopes/expiry).
 5. Pagination and query APIs for run listing at scale.
 
 ## Project status and contribution

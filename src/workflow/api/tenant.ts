@@ -2,15 +2,17 @@ import { createParamDecorator, ExecutionContext } from '@nestjs/common';
 
 import type { Request } from 'express';
 
+import { resolveRequestTenantId } from './auth';
+
 /**
- * Extracts the tenant from the X-Tenant-Id header (falls back to the
- * configured default tenant). The value is validated by parseTenantId at
- * the controller boundary.
+ * Resolves the authenticated tenant for the request: the API key's
+ * tenant, bound server-side by ApiKeyAuthGuard. The X-Tenant-Id
+ * header is never trusted as identity — when present it must match
+ * the authenticated tenant (403 otherwise).
  */
 export const TenantIdParam = createParamDecorator(
-  (_data: unknown, ctx: ExecutionContext): string | undefined => {
+  (_data: unknown, ctx: ExecutionContext): string => {
     const request = ctx.switchToHttp().getRequest<Request>();
-    const header = request.headers['x-tenant-id'];
-    return Array.isArray(header) ? header[0] : header;
+    return resolveRequestTenantId(request);
   },
 );

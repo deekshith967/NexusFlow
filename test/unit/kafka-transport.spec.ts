@@ -45,6 +45,8 @@ function config(): EnvConfig {
     role: 'all',
     transport: 'kafka',
     databaseUrl: 'unused',
+    databaseSsl: false,
+    apiKeys: [],
     port: 0,
     defaultTenantId: '00000000-0000-0000-0000-000000000000',
     serviceId: 'kafka-test',
@@ -54,6 +56,7 @@ function config(): EnvConfig {
       lifecycleTopic: 'nexusflow.workflow.events',
       consumerGroup: 'test-group',
       clientId: 'kafka-test',
+      ssl: false,
     },
     scheduler: { pollIntervalMs: 20, batchLimit: 20, leaseMs: 30_000 },
     worker: { consumerGroup: 'test-group' },
@@ -214,5 +217,104 @@ describe('KafkaMessageTransport (mocked kafkajs)', () => {
     expect(mockConsumer.disconnect).toHaveBeenCalled();
     expect(mockProducer.disconnect).toHaveBeenCalled();
     expect(mockAdmin.disconnect).toHaveBeenCalled();
+  });
+
+  it('passes TLS and SASL options to the Kafka client when configured', () => {
+    const base = config();
+    const transport = new KafkaMessageTransport({
+      ...base.kafka,
+      ssl: true,
+      sasl: {
+        mechanism: 'scram-sha-256',
+        username: 'broker-user',
+        password: 'broker-password',
+      },
+    });
+    void transport;
+
+    const KafkaCtor = Kafka as unknown as jest.Mock;
+    expect(KafkaCtor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ssl: true,
+        sasl: {
+          mechanism: 'scram-sha-256',
+          username: 'broker-user',
+          password: 'broker-password',
+        },
+      }),
+    );
+  });
+
+  it('omits TLS and SASL options for plaintext brokers', () => {
+    const transport = new KafkaMessageTransport(config().kafka);
+    void transport;
+
+    const KafkaCtor = Kafka as unknown as jest.Mock;
+    const calls = KafkaCtor.mock.calls as unknown as Array<
+      [Record<string, unknown>]
+    >;
+    const clientOptions = calls[0][0];
+
+    expect(clientOptions.ssl).toBeUndefined();
+    expect(clientOptions.sasl).toBeUndefined();
+  });
+
+  it('surfaces producer connection failures on publish', async () => {
+    const transport = new KafkaMessageTransport(config().kafka);
+    mockProducer.connect.mockRejectedValueOnce(
+      new Error('broker unreachable'),
+    );
+
+    await expect(
+      transport.publisher.publish('nexusflow.task.dispatch', {
+        key: 'k',
+        value: '{}',
+      }),
+    ).rejects.toThrow('broker unreachable');
+  });
+
+  it('retries send once, then surfaces persistent send failures', async () => {
+    const transport = new KafkaMessageTransport(config().kafka);
+
+    // One transient send failure is retried and succeeds.
+    mockProducer.send.mockRejectedValueOnce(
+      new Error('leader not available'),
+    );
+    await expect(
+      transport.publisher.publish('t', { key: 'k', value: '{}' }),
+    ).resolves.toBeUndefined();
+    expect(mockProducer.send).toHaveBeenCalledTimes(2);
+
+    // Persistent failures propagate after the single retry.
+    mockProducer.send.mockRejectedValueOnce(new Error('still down'));
+    mockProducer.send.mockRejectedValueOnce(new Error('still down'));
+    await expect(
+      transport.publisher.publish('t', { key: 'k', value: '{}' }),
+    ).rejects.toThrow('still down');
+    expect(mockProducer.send).toHaveBeenCalledTimes(4);
+  });
+
+  it('surfaces consumer connection failures on subscribe', async () => {
+    const transport = new KafkaMessageTransport(config().kafka);
+    mockConsumer.connect.mockRejectedValueOnce(
+      new Error('broker unreachable'),
+    );
+
+    await expect(
+      transport.consumer.subscribe({
+        group: 'test-group',
+        topic: 'nexusflow.task.dispatch',
+        handler: () => Promise.resolve(),
+      }),
+    ).rejects.toThrow('broker unreachable');
+  });
+
+  it('surfaces admin connection failures on ensureTopics', async () => {
+    const transport = new KafkaMessageTransport(config().kafka);
+    mockAdmin.connect.mockRejectedValueOnce(new Error('broker unreachable'));
+
+    await expect(
+      transport.ensureTopics(['nexusflow.task.dispatch']),
+    ).rejects.toThrow('broker unreachable');
   });
 });

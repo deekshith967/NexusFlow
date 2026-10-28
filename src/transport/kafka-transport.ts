@@ -1,12 +1,42 @@
 import { Kafka, logLevel } from 'kafkajs';
 
-import { KafkaConfig } from '../config/env';
+import { KafkaConfig, KafkaSaslConfig } from '../config/env';
 import type {
   MessageTransport,
   TransportConsumer,
   TransportMessage,
   TransportPublisher,
 } from './types';
+
+/**
+ * Maps our SASL config to the KafkaJS client options. KafkaJS types
+ * SASL as a discriminated union on the mechanism literal, so each
+ * mechanism is constructed in its own branch.
+ */
+function toKafkaSasl(sasl: KafkaSaslConfig) {
+  switch (sasl.mechanism) {
+    case 'plain':
+      return {
+        mechanism: 'plain' as const,
+        username: sasl.username,
+        password: sasl.password,
+      };
+    case 'scram-sha-256':
+      return {
+        mechanism: 'scram-sha-256' as const,
+        username: sasl.username,
+        password: sasl.password,
+      };
+    case 'scram-sha-512':
+      return {
+        mechanism: 'scram-sha-512' as const,
+        username: sasl.username,
+        password: sasl.password,
+      };
+    default:
+      throw new Error('Unsupported SASL mechanism');
+  }
+}
 
 /**
  * Kafka transport (production). Publication is at-least-once:
@@ -39,6 +69,12 @@ export class KafkaMessageTransport implements MessageTransport {
         initialRetryTime: 200,
         retries: 10,
       },
+      // TLS (verified against system CAs) and SASL for managed
+      // brokers; both stay absent for local plaintext brokers. The
+      // combination is validated in env.ts (SASL requires TLS), and
+      // secrets are never logged (this class logs nothing).
+      ...(config.ssl ? { ssl: true } : {}),
+      ...(config.sasl ? { sasl: toKafkaSasl(config.sasl) } : {}),
     });
 
     this.publisher = {

@@ -15,6 +15,10 @@
  *
  * Required: DATABASE_URL pointing at a reachable PostgreSQL database.
  * Optional: PORT (default 3000), NEXUSFLOW_DEFAULT_TENANT_ID.
+ *
+ * Auth: the demo configures its own NEXUSFLOW_API_KEYS dev key (local
+ * use only — never reuse the demo secret anywhere else) and sends it
+ * as an Authorization: Bearer header on every request.
  */
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
@@ -31,6 +35,10 @@ const TENANT =
   process.env.NEXUSFLOW_DEFAULT_TENANT_ID ??
   '00000000-0000-0000-0000-000000000000';
 
+// Local-demo credential only. Real deployments set NEXUSFLOW_API_KEYS
+// from their secret store (see README "HTTP API" and .env.example).
+const DEMO_API_SECRET = 'demo-local-dev-secret-0000';
+
 async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
 
@@ -42,6 +50,7 @@ async function main(): Promise<void> {
   process.env.NEXUSFLOW_ROLE = 'all';
   process.env.NEXUSFLOW_TRANSPORT = 'memory';
   process.env.NEXUSFLOW_DEFAULT_TENANT_ID = TENANT;
+  process.env.NEXUSFLOW_API_KEYS = `demo:${DEMO_API_SECRET}:${TENANT}`;
   if (!process.env.PORT) {
     process.env.PORT = '3000';
   }
@@ -64,7 +73,11 @@ async function main(): Promise<void> {
   const base = `http://127.0.0.1:${port}`;
   console.log(`==> NexusFlow (role=all) listening on ${base}`);
 
-  const headers = { 'content-type': 'application/json', 'x-tenant-id': TENANT };
+  const headers = {
+    'content-type': 'application/json',
+    'x-tenant-id': TENANT,
+    authorization: `Bearer ${DEMO_API_SECRET}`,
+  };
 
   const call = async (
     method: string,

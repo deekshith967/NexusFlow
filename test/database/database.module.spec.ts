@@ -5,11 +5,16 @@ import { DatabaseModule } from '../../src/database/database.module';
 
 describe('DatabaseModule', () => {
   let previousDatabaseUrl: string | undefined;
+  let previousApiKeys: string | undefined;
   let testingModule: TestingModule | undefined;
 
   beforeEach(() => {
     previousDatabaseUrl = process.env.DATABASE_URL;
+    previousApiKeys = process.env.NEXUSFLOW_API_KEYS;
     process.env.DATABASE_URL = 'postgresql://localhost/nexusflow_test';
+    // loadEnvConfig defaults to the api role, which requires a key.
+    process.env.NEXUSFLOW_API_KEYS =
+      'test:test-secret-for-db-module-test:00000000-0000-0000-0000-000000000000';
   });
 
   afterEach(async () => {
@@ -23,6 +28,12 @@ describe('DatabaseModule', () => {
         delete process.env.DATABASE_URL;
       } else {
         process.env.DATABASE_URL = previousDatabaseUrl;
+      }
+
+      if (previousApiKeys === undefined) {
+        delete process.env.NEXUSFLOW_API_KEYS;
+      } else {
+        process.env.NEXUSFLOW_API_KEYS = previousApiKeys;
       }
     }
   });

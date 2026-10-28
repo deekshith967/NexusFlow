@@ -4,6 +4,9 @@
   "private": true,
   "description": "NexusFlow durable workflow engine",
   "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.22.0 <23.0.0"
+  },
   "scripts": {
     "build": "nest build",
     "start": "nest start",
@@ -15,7 +18,8 @@
     "test:cov": "jest --coverage",
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "demo": "ts-node --files scripts/e2e-demo.ts",
-    "migrate": "ts-node --files scripts/migrate.ts"
+    "migrate": "ts-node --files src/migrate.ts",
+    "migrate:prod": "node dist/migrate.js"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
