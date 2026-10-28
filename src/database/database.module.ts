@@ -19,11 +19,16 @@ const logger = new Logger('DatabaseModule');
 
         const pool = new Pool({
           connectionString: config.databaseUrl,
-          // Managed PostgreSQL (e.g. Render) requires TLS. The server
-          // certificate chain is not verified because managed providers
-          // rotate certificates outside the default trust store; this
-          // protects against passive eavesdropping, not an active MITM.
-          // The connection string itself is never logged.
+          // External managed PostgreSQL endpoints commonly mandate TLS
+          // (Render requires it on external connections). Render's
+          // internal connection string uses the private network where
+          // TLS is optional, so TLS must not be forced there: the pg
+          // client fails closed against a non-TLS server instead of
+          // falling back to plaintext. The server certificate chain is
+          // not verified because managed providers rotate certificates
+          // outside the default trust store; this protects against
+          // passive eavesdropping, not an active MITM. The connection
+          // string itself is never logged.
           ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined,
         });
         pool.on('error', () => {

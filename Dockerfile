@@ -5,11 +5,14 @@
 # Run `npm run migrate:prod` (or `node dist/migrate.js`) once per deploy,
 # from a single process, before starting the roles.
 #
+# Node.js is pinned to 22.22.0, matching .node-version (Render) and the
+# engines field in package.json.
+#
 #   docker build -t nexusflow .
 #   docker run --rm -e DATABASE_URL='...' nexusflow node dist/migrate.js
 #   docker run -d -p 3000:3000 -e DATABASE_URL='...' -e NEXUSFLOW_ROLE=api nexusflow
 
-FROM node:22-slim AS build
+FROM node:22.22.0-slim AS build
 
 WORKDIR /app
 
@@ -19,7 +22,7 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM node:22-slim AS production
+FROM node:22.22.0-slim AS production
 
 ENV NODE_ENV=production
 

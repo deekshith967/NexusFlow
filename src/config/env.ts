@@ -16,8 +16,11 @@ export interface EnvConfig {
   /**
    * Whether the PostgreSQL connection uses TLS. Explicit
    * `DATABASE_SSL=true/false` wins; otherwise auto-detected from
-   * `sslmode`/`ssl` parameters in DATABASE_URL (managed providers such
-   * as Render require TLS).
+   * `sslmode`/`ssl` parameters in DATABASE_URL. External managed
+   * endpoints commonly mandate TLS (Render requires it on external
+   * connections); Render's internal connection string uses the
+   * private network where TLS is optional, so leave DATABASE_SSL
+   * unset for the internal URL.
    */
   readonly databaseSsl: boolean;
   readonly kafka: KafkaConfig;

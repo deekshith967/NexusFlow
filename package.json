@@ -4,6 +4,9 @@
   "private": true,
   "description": "NexusFlow durable workflow engine",
   "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.22.0 <23.0.0"
+  },
   "scripts": {
     "build": "nest build",
     "start": "nest start",

@@ -4,8 +4,22 @@
 # Kafka is NOT provisioned here (Render has no managed Kafka): set
 # KAFKA_BOOTSTRAP_SERVERS in the dashboard to an external broker
 # (e.g. Upstash, Confluent Cloud, Redpanda Cloud) before deploying.
-# The free plans below sleep when idle; use paid plans for always-on
-# production roles (a sleeping scheduler/worker/relay stops processing).
+#
+# Plans: only the web service and the database can use the Free plan.
+# Background workers have NO free tier, so scheduler/worker/relay use
+# 0.5c-512mb (the cheapest valid worker plan). The free web service
+# sleeps after 15 minutes without traffic; use paid plans for
+# always-on production roles. The free database expires 30 days after
+# creation (see README).
+#
+# TLS: DATABASE_URL (fromDatabase connectionString) injects Render's
+# INTERNAL database URL, which uses the private network where TLS is
+# optional. DATABASE_SSL is deliberately NOT set here: forcing TLS
+# crashes every service at boot when the server does not offer TLS
+# (the pg client fails closed with "The server does not support SSL
+# connections" instead of falling back to plaintext). TLS stays
+# available for external/TLS-mandating endpoints via DATABASE_SSL=true
+# or ?sslmode=require (see README).
 
 services:
   - type: web
@@ -18,6 +32,8 @@ services:
     # coordinated and would fail the deploy.
     preDeployCommand: npm run migrate:prod
     startCommand: node dist/main.js
+    # No maxShutdownDelaySeconds: the stateless API needs no drain
+    # beyond the default 30s grace.
     healthCheckPath: /health/ready
     envVars:
       - key: NEXUSFLOW_ROLE
@@ -28,8 +44,6 @@ services:
         fromDatabase:
           name: nexusflow-db
           property: connectionString
-      - key: DATABASE_SSL
-        value: "true"
       - key: KAFKA_BOOTSTRAP_SERVERS
         sync: false
       - key: NEXUSFLOW_DISPATCH_TOPIC
@@ -42,9 +56,11 @@ services:
   - type: worker
     name: nexusflow-scheduler
     runtime: node
-    plan: free
+    plan: 0.5c-512mb
     buildCommand: npm ci && npm run build
     startCommand: node dist/main.js
+    # No maxShutdownDelaySeconds: shutdown only clears the poll timer
+    # (default 30s grace); unclaimed work is recovered via leases.
     envVars:
       - key: NEXUSFLOW_ROLE
         value: scheduler
@@ -54,8 +70,6 @@ services:
         fromDatabase:
           name: nexusflow-db
           property: connectionString
-      - key: DATABASE_SSL
-        value: "true"
       - key: KAFKA_BOOTSTRAP_SERVERS
         sync: false
       - key: NEXUSFLOW_DISPATCH_TOPIC
@@ -68,9 +82,14 @@ services:
   - type: worker
     name: nexusflow-worker
     runtime: node
-    plan: free
+    plan: 0.5c-512mb
     buildCommand: npm ci && npm run build
     startCommand: node dist/main.js
+    # Shutdown headroom for consumer leave-group/disconnect plus
+    # in-flight completion writes. In-flight handlers are NOT awaited
+    # (lease expiry reclaims them either way), so 60s is headroom, not
+    # a drain requirement. Max 300.
+    maxShutdownDelaySeconds: 60
     envVars:
       - key: NEXUSFLOW_ROLE
         value: worker
@@ -80,8 +99,6 @@ services:
         fromDatabase:
           name: nexusflow-db
           property: connectionString
-      - key: DATABASE_SSL
-        value: "true"
       - key: KAFKA_BOOTSTRAP_SERVERS
         sync: false
       - key: NEXUSFLOW_DISPATCH_TOPIC
@@ -94,9 +111,14 @@ services:
   - type: worker
     name: nexusflow-relay
     runtime: node
-    plan: free
+    plan: 0.5c-512mb
     buildCommand: npm ci && npm run build
     startCommand: node dist/main.js
+    # Shutdown grace for the bounded drain: the relay finishes its
+    # in-flight publish cycle (at most one RELAY_PUBLISH_TIMEOUT_MS
+    # publish plus DB overhead) before its shutdown hook returns.
+    # Kill-safe regardless via claim expiry; 120s avoids relying on it.
+    maxShutdownDelaySeconds: 120
     envVars:
       - key: NEXUSFLOW_ROLE
         value: outbox-relay
@@ -106,8 +128,6 @@ services:
         fromDatabase:
           name: nexusflow-db
           property: connectionString
-      - key: DATABASE_SSL
-        value: "true"
       - key: KAFKA_BOOTSTRAP_SERVERS
         sync: false
       - key: NEXUSFLOW_DISPATCH_TOPIC
@@ -118,6 +138,8 @@ services:
         value: nexusflow-workers
 
 databases:
+  # Free plan: 1 GB storage, expires 30 days after creation with a
+  # 14-day upgrade grace period, no backups. See README "Render".
   - name: nexusflow-db
     plan: free
     databaseName: nexusflow

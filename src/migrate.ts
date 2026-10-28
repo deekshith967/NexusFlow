@@ -8,9 +8,10 @@
  *   npm run build && npm run migrate:prod
  *
  * Idempotent: already-applied migrations are skipped (tracked in
- * schema_migrations). Honors DATABASE_SSL / sslmode=require for managed
- * PostgreSQL. Run once per deploy, from a single process: concurrent
- * migrates are not coordinated.
+ * schema_migrations). Honors DATABASE_SSL / sslmode=require for
+ * TLS-mandating PostgreSQL endpoints (leave DATABASE_SSL unset for
+ * Render's internal URL). Run once per deploy, from a single process:
+ * concurrent migrates are not coordinated.
  */
 import {
   applyMigrations,

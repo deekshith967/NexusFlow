@@ -31,7 +31,7 @@ NexusFlow does **not** claim exactly-once task execution or exactly-once externa
 ## Technology stack
 
 - TypeScript (strict, `commonjs`)
-- Node.js / npm (Node 18+; the demo uses the built-in `fetch`)
+- Node.js / npm (pinned to Node 22.22.0 via `.node-version`, `package.json` `engines`, and the `Dockerfile`; the demo uses the built-in `fetch`)
 - NestJS 11
 - PostgreSQL (`pg`) — authoritative state; migrations applied via an idempotent, tracked applier (`schema_migrations`)
 - Kafka (`kafkajs`) — production transport for dispatch + lifecycle events (idempotent producer, consumer group, topic bootstrap)
@@ -76,7 +76,7 @@ NexusFlow does **not** claim exactly-once task execution or exactly-once externa
 
 ## Prerequisites
 
-- Node.js 18+ and npm
+- Node.js 22.22.x and npm (exact pin in `.node-version`; `engines` requires `>=22.22.0 <23.0.0`)
 - A reachable **PostgreSQL** database (any version the `pg` driver supports; the test suite proves PostgreSQL 18)
 - **Kafka** — only when running `NEXUSFLOW_TRANSPORT=kafka` (i.e., any multi-process deployment). Not needed for tests or the single-process demo.
 
@@ -206,11 +206,36 @@ the health check; background workers for `scheduler`, `worker`, and
 - Migrations run once per deploy via the `api` service's
   `preDeployCommand` (`npm run migrate:prod`). Do not add it to the
   other services — concurrent migrates are not coordinated.
-- `DATABASE_SSL=true` is set on every service because Render's managed
-  PostgreSQL requires TLS.
-- The blueprint uses free plans so it can be applied for evaluation;
-  free services sleep when idle, which stops the scheduler, worker,
-  and relay. Use paid plans for always-on production roles.
+- Plans: only the `api` web service and the database use the Free
+  plan. Background workers have no free tier, so `scheduler`,
+  `worker`, and `relay` use `0.5c-512mb` (the cheapest valid worker
+  plan). The free web service sleeps after 15 minutes without traffic
+  (~1 minute to wake); use a paid plan for an always-on API.
+- TLS: `DATABASE_SSL` is deliberately **not** set. The blueprint
+  injects Render's **internal** database URL, which uses the private
+  network where TLS is optional — forcing TLS would crash every
+  service at boot when the server does not offer it (the `pg` client
+  fails closed instead of falling back to plaintext). TLS remains
+  available for external or TLS-mandating endpoints via
+  `DATABASE_SSL=true` or `?sslmode=require`.
+- Shutdown grace: `relay` gets `maxShutdownDelaySeconds: 120` so its
+  bounded in-flight drain (at most one `RELAY_PUBLISH_TIMEOUT_MS`
+  publish plus overhead) completes instead of relying on claim-expiry
+  recovery; `worker` gets `60` as headroom for consumer disconnect
+  and in-flight completion writes (in-flight handlers are not
+  awaited — lease expiry reclaims them either way). The API and
+  scheduler keep the 30s default.
+
+Free PostgreSQL limits (per [Render's docs](https://render.com/docs/free)):
+only one free database per workspace, fixed 1 GB storage, **expiry 30
+days after creation** (an expired database is inaccessible unless
+upgraded), a 14-day grace period to upgrade before Render **deletes**
+it with all its data, no backups, no managed connection pooling, and
+possible maintenance/restarts at any time. Upgrade path: upgrade the
+database to any paid compute plan from the Render Dashboard **before
+the grace period ends** — the data stays in place. (Changing a
+database's compute plan needs brief downtime.) Do not run production
+data on the free database.
 
 > Note: the blueprint has been syntax/structure-validated but not
 > applied to a Render account from here — no credentials or live
@@ -305,12 +330,13 @@ Suite overview (at the current HEAD):
 | Suite | Type | What it proves |
 | --- | --- | --- |
 | `test/workflow/workflow-domain.spec.ts` | unit | DAG validation, version state machine, failure policies |
-| `test/unit/env.spec.ts` | unit | env parsing/validation: defaults, DATABASE_URL, role/transport, memory guard for worker + outbox-relay, tenant UUID, tuning ints, DATABASE_SSL explicit/auto-detect/override |
+| `test/unit/env.spec.ts` | unit | env parsing/validation: defaults, DATABASE_URL, role/transport, memory guard for worker + outbox-relay, tenant UUID, tuning ints, DATABASE_SSL explicit/auto-detect/override, Render internal-URL shape, pool/check consistency |
 | `test/unit/health.controller.spec.ts` | unit | liveness plus the readiness status contract: 200 `ready` vs 503 `not_ready` when PostgreSQL is down (no database needed) |
 | `test/unit/kafka-transport.spec.ts` | unit (mocked `kafkajs`) | client/producer/consumer wiring, topic bootstrap + already-exists tolerance, message mapping, crash reconnect, shutdown |
 | `test/database/database.module.spec.ts` | unit | pool error handler never leaks driver diagnostics to logs |
 | `test/database/database.service.spec.ts` | unit (mocked `pg` pool) | query delegation, transaction commit/rollback/release paths, pool shutdown |
-| `test/database/migrations-applier.spec.ts` | unit (mocked `pg`) | migration-directory resolution; TLS-aware reachability check (explicit DATABASE_SSL, sslmode auto-detect, plain local) |
+| `test/database/migrations-applier.spec.ts` | unit (mocked `pg`) | migration-directory resolution; TLS-aware reachability check (explicit DATABASE_SSL, sslmode auto-detect, plain local, override parity with the app pool) |
+| `test/database/pg-tls-behavior.spec.ts` | **real PostgreSQL** | pins the `pg` no-plaintext-fallback behavior that forbids forcing TLS on Render's internal URL; boot check fails closed when `DATABASE_SSL=true` against a non-TLS server |
 | `test/app.module.spec.ts` | unit | module compilation, pool shutdown |
 | `test/integration/workflow-lifecycle.spec.ts` | **real PostgreSQL** | identity uniqueness incl. concurrent conflicts, draft creation, invalid-DAG rejection, publication atomicity + events, immutability, idempotent run start, task initialization |
 | `test/integration/scheduler-claim.spec.ts` | **real PostgreSQL** | claim selection (READY/due RETRY_WAIT/expired lease), atomicity, fencing increment, concurrency (two schedulers, no double claim) |

@@ -65,8 +65,13 @@ for each and why.
 6. **Deploy convention: single migrator, external Kafka.**
    `Dockerfile` (multi-stage, one image for all roles, selected by
    `NEXUSFLOW_ROLE`) and `render.yaml` (managed PostgreSQL + one
-   service per role, health check on `GET /health/ready`,
-   `DATABASE_SSL=true`) are provided. Migrations run once per deploy
+   service per role, health check on `GET /health/ready`, paid worker
+   plans, shutdown grace on worker/relay) are provided. `DATABASE_SSL`
+   is deliberately unset: the blueprint injects Render's internal URL
+   (private network, TLS optional), and forcing TLS crashes boot when
+   the server does not offer it; external endpoints keep working via
+   `DATABASE_SSL=true` / `?sslmode=require`. Migrations run once per
+   deploy
    from a single process (the `api` service's `preDeployCommand`) —
    concurrent migrates are not coordinated. Kafka stays external to
    the blueprint (Render has no managed Kafka); multi-process

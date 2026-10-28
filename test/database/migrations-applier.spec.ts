@@ -104,4 +104,17 @@ describe('checkDatabaseReachable (mocked pg)', () => {
       ssl: undefined,
     });
   });
+
+  it('lets explicit DATABASE_SSL=false override sslmode=require (same resolution as the app pool)', async () => {
+    process.env.DATABASE_SSL = 'false';
+    const url =
+      'postgres://user:pass@db.example.com:5432/nexusflow?sslmode=require';
+
+    await checkDatabaseReachable(url);
+    expect(Pool).toHaveBeenCalledWith({
+      connectionString: url,
+      max: 1,
+      ssl: undefined,
+    });
+  });
 });

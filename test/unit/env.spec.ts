@@ -156,3 +156,73 @@ describe('resolveDatabaseSsl', () => {
     ).toBe(false);
   });
 });
+
+describe('resolveDatabaseSsl Render URL shapes', () => {
+  // Render's internal connection string (injected by fromDatabase)
+  // carries no TLS parameters, and the private network does not
+  // require TLS — so TLS must stay OFF by default. Forcing it makes
+  // every service fail at boot (the pg client has no plaintext
+  // fallback; see test/database/pg-tls-behavior.spec.ts). That is why
+  // render.yaml deliberately omits DATABASE_SSL.
+  const internalUrl =
+    'postgres://nexusflow:secret@dpg-abc123-a.oregon-postgres.render.com:5432/nexusflow';
+
+  it('leaves TLS off for Render internal URLs without an override', () => {
+    expect(resolveDatabaseSsl(internalUrl, {})).toBe(false);
+    expect(loadEnvConfig({ DATABASE_URL: internalUrl }).databaseSsl).toBe(
+      false,
+    );
+  });
+
+  it('lets an explicit override win over the internal URL shape', () => {
+    expect(
+      resolveDatabaseSsl(internalUrl, { DATABASE_SSL: 'true' }),
+    ).toBe(true);
+    expect(
+      loadEnvConfig({ DATABASE_URL: internalUrl, DATABASE_SSL: 'false' })
+        .databaseSsl,
+    ).toBe(false);
+  });
+
+  it('resolves every documented sslmode/ssl variant', () => {
+    for (const mode of ['require', 'prefer', 'verify-ca', 'verify-full']) {
+      expect(
+        resolveDatabaseSsl(`postgres://u:p@host:5432/db?sslmode=${mode}`, {}),
+      ).toBe(true);
+    }
+
+    for (const value of ['true', '1', 'require']) {
+      expect(
+        resolveDatabaseSsl(`postgres://u:p@host:5432/db?ssl=${value}`, {}),
+      ).toBe(true);
+    }
+
+    expect(
+      resolveDatabaseSsl('postgres://u:p@host:5432/db?sslmode=disable', {}),
+    ).toBe(false);
+  });
+
+  it('keeps loadEnvConfig and resolveDatabaseSsl consistent', () => {
+    const cases: Array<{ url: string; ssl?: string }> = [
+      { url: 'postgres://u:p@host:5432/db' },
+      { url: 'postgres://u:p@host:5432/db?sslmode=require' },
+      { url: internalUrl },
+      { url: 'postgres://u:p@host:5432/db', ssl: 'true' },
+      { url: 'postgres://u:p@host:5432/db?sslmode=require', ssl: 'false' },
+    ];
+
+    for (const { url, ssl } of cases) {
+      const env: NodeJS.ProcessEnv = { DATABASE_URL: url };
+
+      if (ssl !== undefined) {
+        env.DATABASE_SSL = ssl;
+      }
+
+      // loadEnvConfig (app pool) and resolveDatabaseSsl (migrate +
+      // boot reachability check) must always agree.
+      expect(loadEnvConfig(env).databaseSsl).toBe(
+        resolveDatabaseSsl(url, env),
+      );
+    }
+  });
+});

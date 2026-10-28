@@ -91,8 +91,10 @@ export async function checkDatabaseReachable(
   connectionString: string,
 ): Promise<string> {
   // TLS-aware pool: the boot-time reachability check (main.ts) and the
-  // migrate script must honor DATABASE_SSL / sslmode=require, or startup
-  // fails against managed PostgreSQL that requires TLS.
+  // migrate script honor DATABASE_SSL / sslmode=require, like the app
+  // pool. Startup fails against TLS-mandating endpoints without TLS —
+  // and equally fails against non-TLS endpoints if TLS is forced (the
+  // pg client does not fall back to plaintext).
   const pool = poolFor(connectionString, 1);
 
   try {
