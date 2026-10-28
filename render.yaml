@@ -4,6 +4,13 @@
 # Kafka is NOT provisioned here (Render has no managed Kafka): set
 # KAFKA_BOOTSTRAP_SERVERS in the dashboard to an external broker
 # (e.g. Upstash, Confluent Cloud, Redpanda Cloud) before deploying.
+# External brokers require SASL_SSL: KAFKA_SSL=true is set below and
+# the SASL mechanism/username/password are dashboard-prompted on the
+# worker and relay services (the only roles that touch Kafka).
+#
+# API auth: the api service requires NEXUSFLOW_API_KEYS
+# (name:secret:tenant-UUID entries, dashboard-prompted, never inline).
+# Health endpoints stay public so Render's health checks work.
 #
 # Plans: only the web service and the database can use the Free plan.
 # Background workers have NO free tier, so scheduler/worker/relay use
@@ -44,6 +51,10 @@ services:
         fromDatabase:
           name: nexusflow-db
           property: connectionString
+      - key: NEXUSFLOW_API_KEYS
+        sync: false
+      - key: KAFKA_SSL
+        value: "true"
       - key: KAFKA_BOOTSTRAP_SERVERS
         sync: false
       - key: NEXUSFLOW_DISPATCH_TOPIC
@@ -70,6 +81,8 @@ services:
         fromDatabase:
           name: nexusflow-db
           property: connectionString
+      - key: KAFKA_SSL
+        value: "true"
       - key: KAFKA_BOOTSTRAP_SERVERS
         sync: false
       - key: NEXUSFLOW_DISPATCH_TOPIC
@@ -99,7 +112,17 @@ services:
         fromDatabase:
           name: nexusflow-db
           property: connectionString
+      - key: KAFKA_SSL
+        value: "true"
       - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false
+      # SASL credentials for the external broker (plain for Confluent
+      # Cloud, scram-sha-256/512 for Upstash/Redpanda).
+      - key: KAFKA_SASL_MECHANISM
+        sync: false
+      - key: KAFKA_SASL_USERNAME
+        sync: false
+      - key: KAFKA_SASL_PASSWORD
         sync: false
       - key: NEXUSFLOW_DISPATCH_TOPIC
         value: nexusflow.task.dispatch
@@ -128,7 +151,17 @@ services:
         fromDatabase:
           name: nexusflow-db
           property: connectionString
+      - key: KAFKA_SSL
+        value: "true"
       - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false
+      # SASL credentials for the external broker (plain for Confluent
+      # Cloud, scram-sha-256/512 for Upstash/Redpanda).
+      - key: KAFKA_SASL_MECHANISM
+        sync: false
+      - key: KAFKA_SASL_USERNAME
+        sync: false
+      - key: KAFKA_SASL_PASSWORD
         sync: false
       - key: NEXUSFLOW_DISPATCH_TOPIC
         value: nexusflow.task.dispatch

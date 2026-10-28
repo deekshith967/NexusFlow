@@ -2,31 +2,26 @@ import {
   BadRequestException,
   Controller,
   Get,
-  Inject,
   Param,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 
-import { APP_CONFIG } from '../../config/config.module';
-import { EnvConfig } from '../../config/env';
 import { RunService } from '../application/run.service';
-import { parseTenantId } from './dto';
+import { ApiKeyAuthGuard } from './auth';
 import { TenantIdParam } from './tenant';
 
+@UseGuards(ApiKeyAuthGuard)
 @Controller()
 export class RunController {
-  constructor(
-    private readonly runs: RunService,
-    @Inject(APP_CONFIG) private readonly config: EnvConfig,
-  ) {}
+  constructor(private readonly runs: RunService) {}
 
   @Get('runs')
   async listRuns(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Query('workflowId') workflowId?: string,
     @Query('limit') limit?: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     const parsedLimit = limit === undefined ? undefined : Number(limit);
 
     if (
@@ -43,28 +38,25 @@ export class RunController {
 
   @Get('runs/:workflowRunId')
   async getRun(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowRunId') workflowRunId: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     return this.runs.getRunDetail(tenantId, workflowRunId);
   }
 
   @Get('runs/:workflowRunId/tasks')
   async listTasks(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowRunId') workflowRunId: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     return this.runs.listTaskExecutions(tenantId, workflowRunId);
   }
 
   @Get('runs/:workflowRunId/tasks/:taskExecutionId/attempts')
   async listAttempts(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('taskExecutionId') taskExecutionId: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     return this.runs.listAttempts(tenantId, taskExecutionId);
   }
 }

@@ -3,21 +3,19 @@ import {
   Controller,
   Get,
   HttpCode,
-  Inject,
   Param,
   Post,
   Put,
   Req,
   Res,
+  UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 
-import { APP_CONFIG } from '../../config/config.module';
-import { EnvConfig } from '../../config/env';
+import { ApiKeyAuthGuard } from './auth';
 import {
   parseCreateWorkflowBody,
   parseStartRunBody,
-  parseTenantId,
   parseVersionBody,
 } from './dto';
 import { TenantIdParam } from './tenant';
@@ -25,20 +23,19 @@ import { FailurePolicy } from '../domain/failure-policy';
 import { WorkflowService } from '../application/workflow.service';
 import { RunService } from '../application/run.service';
 
+@UseGuards(ApiKeyAuthGuard)
 @Controller()
 export class WorkflowController {
   constructor(
     private readonly workflows: WorkflowService,
     private readonly runs: RunService,
-    @Inject(APP_CONFIG) private readonly config: EnvConfig,
   ) {}
 
   @Post('workflows')
   async createWorkflow(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Body() body: unknown,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     const parsed = parseCreateWorkflowBody(body);
 
     const workflow = await this.workflows.createWorkflow({
@@ -51,27 +48,24 @@ export class WorkflowController {
   }
 
   @Get('workflows')
-  async listWorkflows(@TenantIdParam() tenantHeader: string | undefined) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
+  async listWorkflows(@TenantIdParam() tenantId: string) {
     return this.workflows.listWorkflows(tenantId);
   }
 
   @Get('workflows/:workflowId')
   async getWorkflow(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowId') workflowId: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     return this.workflows.getWorkflow(tenantId, workflowId);
   }
 
   @Post('workflows/:workflowId/versions')
   async createVersion(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowId') workflowId: string,
     @Body() body: unknown,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     const parsed = parseVersionBody(body);
     const workflow = await this.workflows.getWorkflow(tenantId, workflowId);
 
@@ -103,22 +97,20 @@ export class WorkflowController {
 
   @Get('workflows/:workflowId/versions')
   async listVersions(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowId') workflowId: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     return this.workflows.listVersions(tenantId, workflowId);
   }
 
   @Post('workflows/:workflowId/runs')
   async startRun(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowId') workflowId: string,
     @Body() body: unknown,
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     const parsed = parseStartRunBody(body);
 
     const result = await this.runs.startRun({
@@ -146,29 +138,25 @@ export class WorkflowController {
   }
 }
 
+@UseGuards(ApiKeyAuthGuard)
 @Controller('versions')
 export class VersionController {
-  constructor(
-    private readonly workflows: WorkflowService,
-    @Inject(APP_CONFIG) private readonly config: EnvConfig,
-  ) {}
+  constructor(private readonly workflows: WorkflowService) {}
 
   @Get(':workflowVersionId')
   async getVersion(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowVersionId') workflowVersionId: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     return this.workflows.getVersion(tenantId, workflowVersionId);
   }
 
   @Put(':workflowVersionId/definition')
   async updateDefinition(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowVersionId') workflowVersionId: string,
     @Body() body: unknown,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     const parsed = parseVersionBody(body);
     const existing = await this.workflows.getVersion(tenantId, workflowVersionId);
 
@@ -200,30 +188,27 @@ export class VersionController {
   @Post(':workflowVersionId/validate')
   @HttpCode(200)
   async validate(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowVersionId') workflowVersionId: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     return this.workflows.getValidationReport(tenantId, workflowVersionId);
   }
 
   @Post(':workflowVersionId/publish')
   @HttpCode(200)
   async publish(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowVersionId') workflowVersionId: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     return this.workflows.publish(tenantId, workflowVersionId);
   }
 
   @Post(':workflowVersionId/retire')
   @HttpCode(200)
   async retire(
-    @TenantIdParam() tenantHeader: string | undefined,
+    @TenantIdParam() tenantId: string,
     @Param('workflowVersionId') workflowVersionId: string,
   ) {
-    const tenantId = parseTenantId(tenantHeader, this.config.defaultTenantId);
     return this.workflows.retire(tenantId, workflowVersionId);
   }
 }

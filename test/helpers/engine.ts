@@ -53,6 +53,8 @@ export function baseConfig(options: BaseConfigOptions = {}): EnvConfig {
     transport: 'memory',
     databaseUrl: 'unused',
     databaseSsl: false,
+    // The engine drives services directly (no HTTP); no API keys needed.
+    apiKeys: [],
     port: 0,
     defaultTenantId: '00000000-0000-0000-0000-000000000000',
     serviceId: 'test',
@@ -62,6 +64,7 @@ export function baseConfig(options: BaseConfigOptions = {}): EnvConfig {
       lifecycleTopic: 'nexusflow.workflow.events',
       consumerGroup: 'test-workers',
       clientId: 'test',
+      ssl: false,
     },
     scheduler: {
       pollIntervalMs: options.pollIntervalMs ?? 20,
