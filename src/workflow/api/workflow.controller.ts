@@ -4,6 +4,7 @@ import {
   Get,
   HttpCode,
   Param,
+  ParseUUIDPipe,
   Post,
   Put,
   Req,
@@ -55,7 +56,7 @@ export class WorkflowController {
   @Get('workflows/:workflowId')
   async getWorkflow(
     @TenantIdParam() tenantId: string,
-    @Param('workflowId') workflowId: string,
+    @Param('workflowId', ParseUUIDPipe) workflowId: string,
   ) {
     return this.workflows.getWorkflow(tenantId, workflowId);
   }
@@ -63,7 +64,7 @@ export class WorkflowController {
   @Post('workflows/:workflowId/versions')
   async createVersion(
     @TenantIdParam() tenantId: string,
-    @Param('workflowId') workflowId: string,
+    @Param('workflowId', ParseUUIDPipe) workflowId: string,
     @Body() body: unknown,
   ) {
     const parsed = parseVersionBody(body);
@@ -98,7 +99,7 @@ export class WorkflowController {
   @Get('workflows/:workflowId/versions')
   async listVersions(
     @TenantIdParam() tenantId: string,
-    @Param('workflowId') workflowId: string,
+    @Param('workflowId', ParseUUIDPipe) workflowId: string,
   ) {
     return this.workflows.listVersions(tenantId, workflowId);
   }
@@ -106,7 +107,7 @@ export class WorkflowController {
   @Post('workflows/:workflowId/runs')
   async startRun(
     @TenantIdParam() tenantId: string,
-    @Param('workflowId') workflowId: string,
+    @Param('workflowId', ParseUUIDPipe) workflowId: string,
     @Body() body: unknown,
     @Req() req: Request,
     @Res() res: Response,
@@ -146,7 +147,7 @@ export class VersionController {
   @Get(':workflowVersionId')
   async getVersion(
     @TenantIdParam() tenantId: string,
-    @Param('workflowVersionId') workflowVersionId: string,
+    @Param('workflowVersionId', ParseUUIDPipe) workflowVersionId: string,
   ) {
     return this.workflows.getVersion(tenantId, workflowVersionId);
   }
@@ -154,7 +155,7 @@ export class VersionController {
   @Put(':workflowVersionId/definition')
   async updateDefinition(
     @TenantIdParam() tenantId: string,
-    @Param('workflowVersionId') workflowVersionId: string,
+    @Param('workflowVersionId', ParseUUIDPipe) workflowVersionId: string,
     @Body() body: unknown,
   ) {
     const parsed = parseVersionBody(body);
@@ -189,7 +190,7 @@ export class VersionController {
   @HttpCode(200)
   async validate(
     @TenantIdParam() tenantId: string,
-    @Param('workflowVersionId') workflowVersionId: string,
+    @Param('workflowVersionId', ParseUUIDPipe) workflowVersionId: string,
   ) {
     return this.workflows.getValidationReport(tenantId, workflowVersionId);
   }
@@ -198,7 +199,7 @@ export class VersionController {
   @HttpCode(200)
   async publish(
     @TenantIdParam() tenantId: string,
-    @Param('workflowVersionId') workflowVersionId: string,
+    @Param('workflowVersionId', ParseUUIDPipe) workflowVersionId: string,
   ) {
     return this.workflows.publish(tenantId, workflowVersionId);
   }
@@ -207,7 +208,7 @@ export class VersionController {
   @HttpCode(200)
   async retire(
     @TenantIdParam() tenantId: string,
-    @Param('workflowVersionId') workflowVersionId: string,
+    @Param('workflowVersionId', ParseUUIDPipe) workflowVersionId: string,
   ) {
     return this.workflows.retire(tenantId, workflowVersionId);
   }

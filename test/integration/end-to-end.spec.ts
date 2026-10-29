@@ -319,6 +319,47 @@ describe('end-to-end workflow execution', () => {
     expect(attempts[0].failure_code).toBe('HANDLER_FAILED');
   });
 
+  it('records a real worker handler timeout as a TIMED_OUT attempt, then fails the run', async () => {
+    const { workflowRunId } = await setupRun(engine, [
+      task('too-slow', [], {
+        handlerType: 'sleep',
+        retryPolicy: { maxAttempts: 2, retryDelayMs: 0 },
+        timeoutMs: 50,
+        configuration: { ms: 400 },
+      }),
+    ]);
+
+    const finalState = await engine.drainRun(workflowRunId);
+    expect(finalState).toBe('FAILED');
+
+    const attempts = (
+      await pool.query<{ attempt_number: number; state: string; failure_code: string | null }>(
+        `
+        SELECT attempt_number, state, failure_code
+        FROM task_attempts
+        WHERE task_execution_id = (
+          SELECT task_execution_id FROM task_executions
+          WHERE workflow_run_id = $1
+        )
+        ORDER BY attempt_number
+      `,
+        [workflowRunId],
+      )
+    ).rows;
+
+    // Timeout is classified retryable: two attempts, both TIMED_OUT.
+    expect(attempts.map((a) => a.state)).toEqual(['TIMED_OUT', 'TIMED_OUT']);
+    expect(attempts.every((a) => a.failure_code === 'TIMEOUT')).toBe(true);
+
+    const taskRow = (
+      await pool.query<{ state: string; failure_code: string | null }>(
+        'SELECT state, failure_code FROM task_executions WHERE workflow_run_id = $1',
+        [workflowRunId],
+      )
+    ).rows[0];
+    expect(taskRow).toEqual({ state: 'FAILED', failure_code: 'TIMEOUT' });
+  });
+
   it('all lifecycle outbox events are published for a successful run', async () => {
     const { workflowRunId } = await setupRun(engine, [task('e2e-evt')]);
     await engine.drainRun(workflowRunId);

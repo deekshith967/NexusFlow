@@ -12,6 +12,7 @@ import {
 } from '../../common/errors';
 import { OutboxEventType } from '../../outbox/events';
 import { insertOutboxEvent } from '../../outbox/outbox-repository';
+import { createBuiltinRegistry } from '../../worker/handlers/builtins';
 import { DagValidator } from '../domain/dag-validator';
 import { computeDefinitionHash } from '../domain/definition-hash';
 import { WorkflowDefinition } from '../domain/workflow-definition';
@@ -77,6 +78,29 @@ export interface ValidationReport {
 export class WorkflowService {
   private readonly logger = new Logger(WorkflowService.name);
   private readonly validator = new DagValidator();
+
+  /**
+   * Handler references a worker can resolve (contract D.2 step 5,
+   * D.3 step 3). Phase 1 workers execute only the built-in registry, so
+   * a definition naming any other (type, version) could never run.
+   */
+  private readonly knownHandlers: ReadonlySet<string> = new Set(
+    createBuiltinRegistry().list(),
+  );
+
+  private validateDefinition(definition: WorkflowDefinition): void {
+    this.validator.validate(definition);
+
+    for (const task of definition.tasks) {
+      const key = `${task.handlerType}:${task.handlerVersion}`;
+
+      if (!this.knownHandlers.has(key)) {
+        throw new WorkflowValidationError(
+          `Unknown handler '${key}' for task '${task.taskKey}'; registered handlers: ${[...this.knownHandlers].sort().join(', ')}`,
+        );
+      }
+    }
+  }
 
   constructor(private readonly database: DatabaseService) {}
 
@@ -144,7 +168,7 @@ export class WorkflowService {
   async createDraftVersion(
     input: CreateDraftVersionInput,
   ): Promise<WorkflowVersionRow> {
-    this.validator.validate(input.definition);
+    this.validateDefinition(input.definition);
 
     return this.database.transaction((client) => {
       const workflow = findWorkflowForUpdate(client, input.workflowId);
@@ -176,7 +200,7 @@ export class WorkflowService {
   async updateDraftDefinition(
     input: UpdateDraftDefinitionInput,
   ): Promise<WorkflowVersionRow> {
-    this.validator.validate(input.definition);
+    this.validateDefinition(input.definition);
 
     return this.database.transaction((client) =>
       this.replaceDraftDefinition(client, input),
@@ -236,7 +260,7 @@ export class WorkflowService {
     assertVersionTenant(definition.version, tenantId);
 
     const errors = collectValidationErrors(
-      this.validator,
+      (d) => this.validateDefinition(d),
       domainDefinitionFrom(definition),
     );
 
@@ -266,7 +290,7 @@ export class WorkflowService {
       const domainDefinition = domainDefinitionFrom(definition);
 
       for (const error of collectValidationErrors(
-        this.validator,
+        (d) => this.validateDefinition(d),
         domainDefinition,
       )) {
         throw new WorkflowValidationError(error);
@@ -535,7 +559,7 @@ export function domainDefinitionFrom(
 }
 
 function collectValidationErrors(
-  validator: DagValidator,
+  validate: (definition: WorkflowDefinition) => void,
   definition: WorkflowDefinition,
 ): string[] {
   const errors: string[] = [];
@@ -543,7 +567,7 @@ function collectValidationErrors(
   // Validate the whole definition; the validator throws on the first
   // violation, so also check per-task for a friendlier report.
   try {
-    validator.validate(definition);
+    validate(definition);
     return [];
   } catch (error) {
     errors.push(
