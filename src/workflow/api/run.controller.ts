@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  ParseUUIDPipe,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -19,7 +20,8 @@ export class RunController {
   @Get('runs')
   async listRuns(
     @TenantIdParam() tenantId: string,
-    @Query('workflowId') workflowId?: string,
+    @Query('workflowId', new ParseUUIDPipe({ optional: true }))
+    workflowId?: string,
     @Query('limit') limit?: string,
   ) {
     const parsedLimit = limit === undefined ? undefined : Number(limit);
@@ -39,7 +41,7 @@ export class RunController {
   @Get('runs/:workflowRunId')
   async getRun(
     @TenantIdParam() tenantId: string,
-    @Param('workflowRunId') workflowRunId: string,
+    @Param('workflowRunId', ParseUUIDPipe) workflowRunId: string,
   ) {
     return this.runs.getRunDetail(tenantId, workflowRunId);
   }
@@ -47,7 +49,7 @@ export class RunController {
   @Get('runs/:workflowRunId/tasks')
   async listTasks(
     @TenantIdParam() tenantId: string,
-    @Param('workflowRunId') workflowRunId: string,
+    @Param('workflowRunId', ParseUUIDPipe) workflowRunId: string,
   ) {
     return this.runs.listTaskExecutions(tenantId, workflowRunId);
   }
@@ -55,8 +57,9 @@ export class RunController {
   @Get('runs/:workflowRunId/tasks/:taskExecutionId/attempts')
   async listAttempts(
     @TenantIdParam() tenantId: string,
-    @Param('taskExecutionId') taskExecutionId: string,
+    @Param('workflowRunId', ParseUUIDPipe) workflowRunId: string,
+    @Param('taskExecutionId', ParseUUIDPipe) taskExecutionId: string,
   ) {
-    return this.runs.listAttempts(tenantId, taskExecutionId);
+    return this.runs.listAttempts(tenantId, workflowRunId, taskExecutionId);
   }
 }

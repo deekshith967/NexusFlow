@@ -199,13 +199,15 @@ export class WorkerService implements OnModuleInit, OnApplicationShutdown {
     }, renewIntervalMs);
     renewTimer.unref?.();
 
-    let result: HandlerResult;
+    let outcome: { result: HandlerResult; timedOut: boolean };
 
     try {
-      result = await this.runHandler(definition, payload);
+      outcome = await this.runHandler(definition, payload);
     } finally {
       clearInterval(renewTimer);
     }
+
+    const { result, timedOut } = outcome;
 
     if (result.status === 'succeeded') {
       await completeSuccess(this.database, {
@@ -223,6 +225,10 @@ export class WorkerService implements OnModuleInit, OnApplicationShutdown {
         code: result.failureCode,
         message: result.failureMessage,
         retryable: result.retryable,
+        // Only the worker's own timeout race marks the attempt TIMED_OUT
+        // (B.4 STARTED -> TIMED_OUT); a handler-reported failure stays
+        // FAILED regardless of the code it chose.
+        timedOut,
       });
     }
   }
@@ -254,7 +260,7 @@ export class WorkerService implements OnModuleInit, OnApplicationShutdown {
   private async runHandler(
     definition: TaskDefinitionForExecution,
     payload: DispatchPayload,
-  ): Promise<HandlerResult> {
+  ): Promise<{ result: HandlerResult; timedOut: boolean }> {
     const handler = this.registry.resolve(
       definition.handler_type,
       definition.handler_version,
@@ -262,10 +268,13 @@ export class WorkerService implements OnModuleInit, OnApplicationShutdown {
 
     if (!handler) {
       return {
-        status: 'failed',
-        failureCode: 'UNKNOWN_HANDLER',
-        failureMessage: `No handler registered for ${definition.handler_type}:${definition.handler_version}`,
-        retryable: false,
+        result: {
+          status: 'failed',
+          failureCode: 'UNKNOWN_HANDLER',
+          failureMessage: `No handler registered for ${definition.handler_type}:${definition.handler_version}`,
+          retryable: false,
+        },
+        timedOut: false,
       };
     }
 
@@ -277,44 +286,50 @@ export class WorkerService implements OnModuleInit, OnApplicationShutdown {
 
     const timeoutMs = definition.timeout_ms;
     const startedAt = Date.now();
+    const timeoutResult: HandlerResult = {
+      status: 'failed',
+      failureCode: 'TIMEOUT',
+      failureMessage: `Handler exceeded timeout of ${timeoutMs}ms`,
+      retryable: true,
+    };
+    const TIMED_OUT = Symbol('timed-out');
+    let timer: NodeJS.Timeout | undefined;
 
     try {
-      const result = await Promise.race([
-        handler(ctx),
-        new Promise<HandlerResult>((resolve) => {
-          const timer = setTimeout(() => {
-            resolve({
-              status: 'failed',
-              failureCode: 'TIMEOUT',
-              failureMessage: `Handler exceeded timeout of ${timeoutMs}ms`,
-              retryable: true,
-            });
-          }, timeoutMs);
+      const raced = await Promise.race([
+        Promise.resolve().then(() => handler(ctx)),
+        new Promise<typeof TIMED_OUT>((resolve) => {
+          timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
           timer.unref?.();
         }),
       ]);
 
-      const elapsed = Date.now() - startedAt;
-      if (elapsed >= timeoutMs && result.status === 'succeeded') {
-        // The handler finished after the timeout fired: treat as timeout.
-        return {
-          status: 'failed',
-          failureCode: 'TIMEOUT',
-          failureMessage: `Handler exceeded timeout of ${timeoutMs}ms`,
-          retryable: true,
-        };
+      if (raced === TIMED_OUT) {
+        return { result: timeoutResult, timedOut: true };
       }
 
-      return result;
+      if (Date.now() - startedAt >= timeoutMs && raced.status === 'succeeded') {
+        // The handler finished after its deadline: treat as timeout.
+        return { result: timeoutResult, timedOut: true };
+      }
+
+      return { result: raced, timedOut: false };
     } catch (error) {
       return {
-        status: 'failed',
-        failureCode: 'HANDLER_ERROR',
-        failureMessage: (error as Error).message,
-        // Unexpected handler exceptions are not classified retryable:
-        // built-in handlers report their own retryability.
-        retryable: false,
+        result: {
+          status: 'failed',
+          failureCode: 'HANDLER_ERROR',
+          failureMessage: (error as Error).message,
+          // Unexpected handler exceptions are not classified retryable:
+          // built-in handlers report their own retryability.
+          retryable: false,
+        },
+        timedOut: false,
       };
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
     }
   }
 

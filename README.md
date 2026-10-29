@@ -112,6 +112,13 @@ migrates are not coordinated. The migrator honors `DATABASE_SSL` /
 `sslmode=require`, so it works against managed PostgreSQL that
 requires TLS. `npm run demo` also applies migrations automatically.
 
+`003_immutability_guards.sql` adds database-level guards (ADR 003):
+published/retired/discarded versions and their task graph, terminal
+runs, task executions and attempts, and published outbox events cannot
+be modified, and fencing tokens cannot decrease. Violations raise
+SQLSTATE `NF001`. The application never triggers them; they catch
+defects and manual SQL.
+
 ## Configuration
 
 Copy `.env.example` to `.env` (or export the variables) and adjust. Key variables:
@@ -317,18 +324,20 @@ Every workflow/version/run endpoint requires `Authorization: Bearer <api-key-sec
 | `POST /workflows` | Create workflow identity (`name`, optional `description`) | 201 | 409 duplicate name in tenant, 422 invalid body |
 | `GET /workflows` | List workflows for the tenant | 200 | 422 invalid tenant |
 | `GET /workflows/:workflowId` | Inspect a workflow | 200 | 404 |
-| `POST /workflows/:workflowId/versions` | Create draft version from `tasks[]` (validated: DAG rules, handler, retry policy, timeout, failure policy) | 201 | 422 |
+| `POST /workflows/:workflowId/versions` | Create draft version from `tasks[]` (validated: DAG rules, registered handler type/version, retry policy, timeout, failure policy) | 201 | 422 |
 | `GET /workflows/:workflowId/versions` | List versions | 200 | — |
 | `GET /versions/:workflowVersionId` | Version + tasks + dependencies | 200 | 404 |
 | `PUT /versions/:workflowVersionId/definition` | Replace draft definition (drafts only) | 200 | 404, 409 published/retired, 422 |
 | `POST /versions/:workflowVersionId/validate` | Validation report `{ valid, errors }` | 200 | 404 |
 | `POST /versions/:workflowVersionId/publish` | Publish (atomic with outbox event) | 200 | 404, 409 invalid transition, 422 invalid DAG |
 | `POST /versions/:workflowVersionId/retire` | Retire a published version | 200 | 404, 409 |
-| `POST /workflows/:workflowId/runs` | Start run (`workflowVersionId?`, `input?`, `idempotencyKey?`) | 201 new / 200 idempotent replay | 404 unknown version, 422 launch rejected |
+| `POST /workflows/:workflowId/runs` | Start run (`workflowVersionId?`, `input?`, `idempotencyKey?`) | 201 new / 200 idempotent replay | 404 unknown (or another tenant's) workflow/version, 422 launch rejected |
 | `GET /runs` | List runs (`workflowId?`, `limit?` 1–200) | 200 | 400 bad limit |
 | `GET /runs/:workflowRunId` | Run + task executions | 200 | 404 |
 | `GET /runs/:workflowRunId/tasks` | Task executions | 200 | 404 |
-| `GET /runs/:workflowRunId/tasks/:taskExecutionId/attempts` | Attempt history | 200 | 404 |
+| `GET /runs/:workflowRunId/tasks/:taskExecutionId/attempts` | Attempt history | 200 | 404 (also when the task is not in that run) |
+
+Path identifiers (`:workflowId`, `:workflowVersionId`, `:workflowRunId`, `:taskExecutionId`) and the `workflowId` query parameter must be UUIDs; anything else is a 400.
 | `GET /health` | Liveness | 200 | — |
 | `GET /health/ready` | Readiness (checks PostgreSQL) | 200 `ready` / 503 `not_ready` (database down) | — |
 
@@ -412,7 +421,9 @@ Suite overview (at the current HEAD):
 | `test/integration/worker-execution.spec.ts` | **real PostgreSQL** | eligibility/fencing validation, stale-completion rejection, lease renewal, timeout, retry scheduling, SKIP_DOWNSTREAM, fan-in, completion algorithm |
 | `test/integration/outbox-relay.spec.ts` | **real PostgreSQL** | SKIP LOCKED claims, publish-outside-tx, conditional marking, failure recording, claim expiry recovery, at-least-once dedupe |
 | `test/integration/http-api.spec.ts` | **real PostgreSQL** + real HTTP | full control plane: status codes, tenant isolation, idempotent run replay, no DB diagnostics leakage |
-| `test/integration/end-to-end.spec.ts` | **real PostgreSQL** | crash-recovery scenarios: worker crash mid-execution (lease expiry + stale-token rejection), FAIL_WORKFLOW, SKIP_DOWNSTREAM, retry-then-success, full lifecycle event stream |
+| `test/integration/end-to-end.spec.ts` | **real PostgreSQL** | crash-recovery scenarios: worker crash mid-execution (lease expiry + stale-token rejection), FAIL_WORKFLOW, SKIP_DOWNSTREAM, retry-then-success, real handler timeout recorded as `TIMED_OUT`, full lifecycle event stream |
+| `test/integration/failure-injection.spec.ts` | **real PostgreSQL** | PostgreSQL connection killed before COMMIT of claim, success, failure, and run-start transactions (no partial state, retry applies once); concurrent final-task completion, success-vs-FAIL_WORKFLOW race, duplicate concurrent reports |
+| `test/database/immutability-guards.spec.ts` | **real PostgreSQL** | migration 003 guards: published definitions, terminal runs/tasks/attempts, published outbox events, fencing-token monotonicity |
 
 Integration tests start a real, throwaway PostgreSQL server (via the `embedded-postgres` dev dependency) and apply the real migrations — schema and concurrency behavior are tested against an actual database, not a mock.
 
@@ -433,6 +444,9 @@ Honest boundaries of what is verified:
 - **No Redis** (reserved by the contract; not used anywhere).
 - Handlers are deterministic built-ins only; there is no plugin/untrusted-code execution path.
 - Exactly-once execution is **not** claimed: at-least-once delivery with idempotent, conditionally-guarded state transitions.
+- **Lease-expiry reclaims are not capped by `retryPolicy.maxAttempts`.** A task whose worker dies on every attempt (for example, a handler that crashes the process) is reclaimed indefinitely; only reported failures consume the retry budget. The contract specifies reclaim on expiry but no cap, so this is left as-is and tracked on the roadmap.
+- **The outbox relay has no per-event backoff.** A single event that fails publication permanently is retried every poll and, if a full batch of such events sits at the head of the queue, later events wait behind it.
+- After `FAIL_WORKFLOW`, `WAITING` tasks become `BLOCKED`; tasks already `READY`/`CLAIMED`/`RUNNING`/`RETRY_WAIT` keep that state but can never be claimed or report successfully (contract B.2 "remain non-executable").
 
 ## Architecture constraints
 
@@ -454,6 +468,7 @@ Consult `AGENTS.md` before asking coding agents to make changes.
 3. `IGNORE_FAILURE` failure policy (per contract deferral).
 4. Observability (structured metrics/traces), per-tenant rate limiting, and stronger authn/z (OIDC/JWT, key scopes/expiry).
 5. Pagination and query APIs for run listing at scale.
+6. Cap or alert on repeated lease-expiry reclaims, and per-event backoff in the outbox relay (see Limitations).
 
 ## Project status and contribution
 

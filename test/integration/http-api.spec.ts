@@ -482,6 +482,72 @@ describe('HTTP API (real PostgreSQL)', () => {
     expect(published.body.state).toBe('PUBLISHED');
   });
 
+  it('run launch and run inspection do not reveal another tenant\'s resources', async () => {
+    const a = await createPublishedWorkflow(TENANT_A);
+    const b = await createPublishedWorkflow(TENANT_B);
+
+    // B launches A's workflow (latest published version): 404, same as a
+    // workflow that does not exist, and no run is created.
+    const viaWorkflow = await api('POST', `/workflows/${a.workflowId}/runs`, {}, TENANT_B);
+    expect(viaWorkflow.status).toBe(404);
+    expect(JSON.stringify(viaWorkflow.body)).not.toMatch(/tenant/i);
+
+    // B pins A's version under B's own workflow: 404 for the version.
+    const viaVersion = await api(
+      'POST',
+      `/workflows/${b.workflowId}/runs`,
+      { workflowVersionId: a.versionId },
+      TENANT_B,
+    );
+    expect(viaVersion.status).toBe(404);
+    expect(JSON.stringify(viaVersion.body)).not.toMatch(/tenant/i);
+
+    const runsForA = await db.pool.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM workflow_runs WHERE workflow_id = $1',
+      [a.workflowId],
+    );
+    expect(runsForA.rows[0].n).toBe(0);
+
+    // Attempts are only listed through the run that owns the task.
+    const runA = await api('POST', `/workflows/${a.workflowId}/runs`, {}, TENANT_A);
+    const runA2 = await api('POST', `/workflows/${a.workflowId}/runs`, {}, TENANT_A);
+    expect(runA.status).toBe(201);
+    expect(runA2.status).toBe(201);
+    const runAId = runA.body.workflow_run_id as string;
+    const runA2Id = runA2.body.workflow_run_id as string;
+    const tasksA = await api('GET', `/runs/${runAId}/tasks`, undefined, TENANT_A);
+    const taskId = (tasksA.body as unknown as { task_execution_id: string }[])[0].task_execution_id;
+
+    const mismatched = await api(
+      'GET',
+      `/runs/${runA2Id}/tasks/${taskId}/attempts`,
+      undefined,
+      TENANT_A,
+    );
+    expect(mismatched.status).toBe(404);
+    expect(
+      (await api('GET', `/runs/${runAId}/tasks/${taskId}/attempts`, undefined, TENANT_B)).status,
+    ).toBe(404);
+  });
+
+  it('rejects malformed resource identifiers with 400, never a 500', async () => {
+    for (const [method, path] of [
+      ['GET', '/workflows/not-a-uuid'],
+      ['GET', '/workflows/not-a-uuid/versions'],
+      ['POST', '/workflows/not-a-uuid/versions'],
+      ['POST', '/workflows/not-a-uuid/runs'],
+      ['GET', '/versions/not-a-uuid'],
+      ['POST', '/versions/not-a-uuid/publish'],
+      ['GET', '/runs/not-a-uuid'],
+      ['GET', '/runs/not-a-uuid/tasks'],
+      ['GET', '/runs/not-a-uuid/tasks/also-bad/attempts'],
+      ['GET', '/runs?workflowId=not-a-uuid'],
+    ] as const) {
+      const result = await api(method, path, method === 'POST' ? {} : undefined, TENANT_A);
+      expect({ path, status: result.status }).toEqual({ path, status: 400 });
+    }
+  });
+
   it('starts a run from the published version and supports idempotent replay', async () => {
     const { workflowId } = await createPublishedWorkflow(TENANT_A, [
       task('first'),

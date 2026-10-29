@@ -36,6 +36,10 @@ export async function startTestDb(): Promise<TestDb> {
 
   let stdout = '';
   let info: ServerInfo | null = null;
+  // Set once stop() is called: the exit that follows is intentional.
+  // (embedded-postgres installs its own exit hook, which stops the
+  // server and exits with 143 after SIGTERM; that is a clean shutdown.)
+  let stopping = false;
 
   child.stdout.on('data', (chunk: Buffer) => {
     stdout += chunk.toString();
@@ -60,7 +64,7 @@ export async function startTestDb(): Promise<TestDb> {
 
   // The child is expected to outlive this call; track exit for diagnostics.
   void exited.then((code) => {
-    if (code !== 0) {
+    if (!stopping && code !== 0) {
       process.emitWarning(`embedded postgres child exited with code ${code}`);
     }
   });
@@ -98,6 +102,7 @@ export async function startTestDb(): Promise<TestDb> {
     connectionString: serverInfo.connectionString,
     port: serverInfo.port,
     stop: async () => {
+      stopping = true;
       await pool.end();
       child.kill('SIGTERM');
 

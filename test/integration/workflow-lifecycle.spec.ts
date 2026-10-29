@@ -292,6 +292,55 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
       });
     });
 
+    it('rejects unknown handler references at draft time and at publication (G-4, D.2/D.3)', async () => {
+      const workflow = await newWorkflow('bad-handler');
+      const service = createWorkflowService(pool);
+
+      await expect(
+        service.createDraftVersion({
+          tenantId,
+          workflowId: workflow.workflow_id,
+          definition: definition([task('a', [], { handlerType: 'no-such-handler' })]),
+        }),
+      ).rejects.toThrow(/Unknown handler 'no-such-handler:1'/);
+
+      await expect(
+        service.createDraftVersion({
+          tenantId,
+          workflowId: workflow.workflow_id,
+          definition: definition([task('a', [], { handlerVersion: '99' })]),
+        }),
+      ).rejects.toThrow(WorkflowValidationError);
+
+      // A stored draft whose handler reference is corrupted cannot publish.
+      const version = await service.createDraftVersion({
+        tenantId,
+        workflowId: workflow.workflow_id,
+        definition: definition([task('a')]),
+      });
+      await pool.query(
+        `UPDATE task_definitions SET handler_type = 'ghost'
+         WHERE workflow_version_id = $1`,
+        [version.workflow_version_id],
+      );
+
+      const report = await service.getValidationReport(tenantId, version.workflow_version_id);
+      expect(report.valid).toBe(false);
+      expect(report.errors.join(' ')).toMatch(/Unknown handler 'ghost:1'/);
+
+      await expect(
+        service.publish(tenantId, version.workflow_version_id),
+      ).rejects.toThrow(WorkflowValidationError);
+
+      const state = (
+        await pool.query<{ state: string }>(
+          'SELECT state FROM workflow_versions WHERE workflow_version_id = $1',
+          [version.workflow_version_id],
+        )
+      ).rows[0];
+      expect(state.state).toBe('DRAFT');
+    });
+
     it('publishes a valid draft atomically with its outbox event', async () => {
       const workflow = await newWorkflow('publish-atomic');
       const service = createWorkflowService(pool);
@@ -599,7 +648,9 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
         }),
       ).rejects.toThrow();
 
-      // Cross-tenant access is rejected.
+      // Cross-tenant access is indistinguishable from a missing resource
+      // (ADR 001): pinned version -> version not found, implicit latest
+      // version -> workflow not found.
       const other = '22222222-2222-4222-8222-222222222222';
       const { workflow: wf2, version: v2 } = await publishedWorkflow();
       await expect(
@@ -608,7 +659,10 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
           workflowId: wf2.workflow_id,
           workflowVersionId: v2.workflow_version_id,
         }),
-      ).rejects.toBeInstanceOf(RunLaunchRejectedError);
+      ).rejects.toBeInstanceOf(WorkflowVersionNotFoundError);
+      await expect(
+        runs.startRun({ tenantId: other, workflowId: wf2.workflow_id }),
+      ).rejects.toBeInstanceOf(WorkflowNotFoundError);
 
       // A run started by this tenant is invisible to another tenant.
       const started = await runs.startRun({

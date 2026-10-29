@@ -58,7 +58,7 @@ export function createBuiltinRegistry(): HandlerRegistry {
       return {
         status: 'failed',
         failureCode,
-        failureMessage: `Simulated failure on attempt ${ctx.attemptNumber} of ${ctx.attemptNumber} (succeeds at attempt ${failUntilAttempt})`,
+        failureMessage: `Simulated failure on attempt ${ctx.attemptNumber} (succeeds at attempt ${failUntilAttempt})`,
         retryable,
       };
     }

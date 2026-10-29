@@ -5,6 +5,7 @@ import type { PoolClient } from 'pg';
 import { DatabaseService } from '../../database/database.service';
 import {
   RunLaunchRejectedError,
+  WorkflowNotFoundError,
   WorkflowRunNotFoundError,
   WorkflowVersionNotFoundError,
 } from '../../common/errors';
@@ -125,28 +126,38 @@ export class RunService {
                    version_number, state
             FROM workflow_versions
             WHERE workflow_id = $1
+              AND tenant_id = $2
               AND state = 'PUBLISHED'
             ORDER BY version_number DESC
             LIMIT 1
             FOR UPDATE
           `,
-            [input.workflowId],
+            [input.workflowId, input.tenantId],
           )
           .then((r) => r.rows[0] ?? null);
+
+    // Another tenant's resources are indistinguishable from missing ones
+    // (ADR 001): never reveal that a foreign workflow or version exists.
+    if (version && version.tenant_id !== input.tenantId) {
+      throw new WorkflowVersionNotFoundError(version.workflow_version_id);
+    }
 
     if (!version) {
       if (input.workflowVersionId) {
         throw new WorkflowVersionNotFoundError(input.workflowVersionId);
       }
 
+      const owned = await client.query(
+        'SELECT 1 FROM workflows WHERE workflow_id = $1 AND tenant_id = $2',
+        [input.workflowId, input.tenantId],
+      );
+
+      if (owned.rowCount === 0) {
+        throw new WorkflowNotFoundError(input.workflowId);
+      }
+
       throw new RunLaunchRejectedError(
         `No PUBLISHED workflow version exists for workflow '${input.workflowId}'`,
-      );
-    }
-
-    if (version.tenant_id !== input.tenantId) {
-      throw new RunLaunchRejectedError(
-        `Workflow version '${version.workflow_version_id}' does not belong to this tenant`,
       );
     }
 
@@ -511,14 +522,16 @@ export class RunService {
 
   async listAttempts(
     tenantId: string,
+    workflowRunId: string,
     taskExecutionId: string,
   ): Promise<TaskAttemptRow[]> {
     return this.database.transaction((client) => {
-      // Verify ownership through the run's tenant before reading attempts.
+      // Verify ownership through the run's tenant, and that the task
+      // belongs to the run named in the request, before reading attempts.
       const owner = client
-        .query<{ runTenant: string }>(
+        .query<{ runTenant: string; runId: string }>(
           `
-          SELECT wr.tenant_id AS "runTenant"
+          SELECT wr.tenant_id AS "runTenant", wr.workflow_run_id AS "runId"
           FROM task_executions te
           JOIN workflow_runs wr
             ON wr.workflow_run_id = te.workflow_run_id
@@ -529,7 +542,11 @@ export class RunService {
         .then((r) => r.rows[0] ?? null);
 
       return owner.then(async (row) => {
-        if (!row || row.runTenant !== tenantId) {
+        if (
+          !row ||
+          row.runTenant !== tenantId ||
+          row.runId !== workflowRunId
+        ) {
           throw new WorkflowRunNotFoundError(taskExecutionId);
         }
 
