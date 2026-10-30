@@ -608,13 +608,14 @@ describe('workflow lifecycle (real PostgreSQL)', () => {
       expect(count.rows[0].n).toBe(1);
 
       // Concurrent idempotent starts with the same key create one run.
+      const raceKey = `idem-race-${Date.now()}`;
       const [c1, c2, c3] = await Promise.all(
         [0, 1, 2].map(() =>
           runs.startRun({
             tenantId,
             workflowId: workflow.workflow_id,
             workflowVersionId: version.workflow_version_id,
-            idempotencyKey: `idem-race-${Date.now()}`,
+            idempotencyKey: raceKey,
           }),
         ),
       );
