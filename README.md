@@ -1,5 +1,22 @@
 # NexusFlow
 
+## Durable Distributed Workflow Orchestration Engine
+
+NexusFlow is a workflow orchestration engine built with **NestJS, TypeScript, and PostgreSQL**. It enables users to define versioned workflows as directed acyclic graphs (DAGs), execute dependent tasks, manage retries, and track execution reliably.
+
+### Engineering highlights
+
+- **Durable execution:** PostgreSQL-backed workflow state, task executions, attempts, and transactional outbox.
+- **Concurrent scheduling:** Atomic task claiming using `FOR UPDATE SKIP LOCKED`, leases, and fencing tokens.
+- **Reliable dispatch:** Transactional outbox with a Kafka-based message transport.
+- **Fault recovery:** Retry handling, lease expiry recovery, and stale-worker rejection.
+- **Workflow management:** Versioning, DAG validation, publication, and idempotent run creation.
+- **API:** NestJS HTTP control plane with API-key authentication and tenant isolation.
+
+**Project status:** MVP implemented. Core lifecycle and recovery behavior are covered by unit and real-PostgreSQL integration tests. The Kafka transport is implemented and unit-tested with a mocked client; live Kafka broker and multi-process deployment verification remain outstanding.
+
+**Test results:** 161 tests passing across 18 Jest suites.TypeScript typecheck, ESLint, and production build all pass.
+
 **NexusFlow is a durable workflow orchestration engine built on NestJS and PostgreSQL.** Workflow definitions, versions, runs, task executions, attempts, leases, and fencing tokens are persisted in PostgreSQL, which is the authoritative store. A transactional outbox makes event publication intents durable; a scheduler claims eligible tasks with row locks, leases, and fencing tokens; workers execute deterministic built-in handlers; and an outbox relay publishes events to the message transport (Kafka in production, in-memory in local demos and tests).
 
 > **Status: MVP (vertical slice, all phases A–G implemented and tested).** The full lifecycle — workflow identity, draft versions, DAG validation, publication, run creation, scheduling, worker execution with retries, lease expiry/crash recovery, and the HTTP control plane — is implemented and covered by unit and real-PostgreSQL integration tests. See [Limitations](#limitations) for what is explicitly **not** verified (in particular: no real Kafka broker has been exercised).
@@ -23,8 +40,11 @@ NexusFlow does **not** claim exactly-once task execution or exactly-once externa
 - **Transactional outbox + relay** (Phase D): outbox rows committed atomically with state changes; the relay claims rows with `SKIP LOCKED` + claim TTL, publishes **outside** the transaction with a bounded per-publish timeout (`RELAY_PUBLISH_TIMEOUT_MS`), marks published conditionally (owner-checked), records failures only while still owning the claim, and is crash-safe (expired claims are reclaimed).
 - **Scheduler** (Phase D): claims `READY`, due `RETRY_WAIT`, and lease-expired tasks of `RUNNING` runs in one atomic transaction — lease owner/expiry, `fencing_token` increment, attempt creation, input resolution, and `task.claimed` + `task.dispatch.requested` outbox events together. Multiple concurrent schedulers are safe.
 - **Worker** (Phase E): consumes dispatches, validates eligibility (state, attempt, fencing token, live lease) before doing anything, transitions to `RUNNING`, renews leases conditionally, executes only **deterministic built-in handlers** (`echo`, `sleep`, `fail`, `merge` — no untrusted code), and reports success/failure through conditional updates that reject stale completions (zero affected rows ⇒ stale, no mutation).
+
 - **Retry and failure semantics** (Phase E): retryable failures with `maxAttempts`/`retryDelayMs`, `FAIL_WORKFLOW` and `SKIP_DOWNSTREAM` failure policies, `BLOCKED` propagation for downstream of failed tasks, fan-in (all prerequisites) activation, and the exact workflow completion algorithm (B.5) with `workflow.run.succeeded` / `workflow.run.failed` events.
-- **Crash recovery** (contract G): scheduler crash before/after commit (outbox is the source of dispatch truth), worker crash mid-execution (lease expiry + fencing-token rejection of the stale worker), relay crash after publication (idempotent re-marking), Kafka-outage behavior (outbox accumulates; no dispatches lost). All covered by real-PostgreSQL integration tests.
+
+- **Crash recovery:** scheduler and worker crash recovery, lease expiry, stale-worker rejection, relay crash recovery, and transport publish-failure handling. These behaviors are covered by real-PostgreSQL integration tests using the in-memory transport; real Kafka outage behavior remains unverified.
+
 - **HTTP control plane** (Phase F): create/inspect workflows, draft versions (create/update/validate/publish/retire), start runs (with idempotency), inspect runs/tasks/attempts, health + readiness, API-key authentication with server-side tenant binding (`X-Tenant-Id` optional, must match), stable status codes (201/200/404/409/422/400/401/403), and no raw database diagnostics in responses.
 - **Operations** (Phase G): role-gated single application (`api`, `scheduler`, `worker`, `outbox-relay`, `all`), fail-fast PostgreSQL check at startup, health/readiness endpoints, graceful shutdown (the outbox relay fully drains its in-flight publish cycle before its shutdown hook returns, so it never uses the pool or transport after shutdown; loops/transport/pool are then torn down), idempotent migration applier, and an executable end-to-end demo (`npm run demo`).
 
